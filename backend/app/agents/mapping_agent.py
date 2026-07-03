@@ -24,7 +24,6 @@ async def get_nearby_amenities(lat: float, lon: float, amenity: str = "hospital"
             
             results = []
             for element in data.get("elements", []):
-                # nodes have lat/lon directly, ways/relations have center
                 element_lat = element.get("lat") or element.get("center", {}).get("lat")
                 element_lon = element.get("lon") or element.get("center", {}).get("lon")
                 name = element.get("tags", {}).get("name", f"Unknown {amenity}")
@@ -47,3 +46,9 @@ async def get_nearby_hospitals(lat: float, lon: float, radius: int = 5000) -> li
 
 async def get_nearby_shelters(lat: float, lon: float, radius: int = 5000) -> list:
     return await get_nearby_amenities(lat, lon, "social_facility", radius)
+
+async def get_nearby_police(lat: float, lon: float, radius: int = 5000) -> list:
+    return await get_nearby_amenities(lat, lon, "police", radius)
+
+async def get_nearby_fire_stations(lat: float, lon: float, radius: int = 5000) -> list:
+    return await get_nearby_amenities(lat, lon, "fire_station", radius)

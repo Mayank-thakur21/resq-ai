@@ -1,0 +1,29 @@
+# Environments
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.next/
+out/
+build/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS Files
+.DS_Store
+Thumbs.db

@@ -2,19 +2,44 @@
 
 ![ResQ AI](https://img.shields.io/badge/ResQ%20AI-Emergency%20Response-blue.svg?style=for-the-badge)
 
-ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps users before, during, and after natural disasters. Designed for hackathons and rapid deployment, it provides an intelligent multi-agent backend and a highly polished, responsive frontend.
+ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps users before, during, and after natural disasters. Designed for rapid deployment, it provides an intelligent multi-agent backend and a highly polished, responsive frontend.
+
+---
+
+## 🏆 Hackathon Info
+- **Track**: Agents for Good
+- **Project**: ResQ AI
+- **Theme**: AI-powered Disaster Response Platform
+
+---
+
+## 📸 Screenshots
+*(Coming Soon)*
+- Home Dashboard
+- AI Chat
+- Relief Map
+- Smart Checklist
+- SOS Contacts
+
+---
+
+## 🎥 Demo
+- **Demo Video**: *(Coming Soon)*
+- **Live Demo**: *(Coming Soon)*
+
+---
 
 ## 🚀 Features
 
 ### 1. **Multi-Agent Emergency Dashboard**
 - Modern UI with Glassmorphism and **Framer Motion** micro-animations.
-- **Live Alert Banners** and dynamic mock weather integrations.
+- **Live Alert Banners** and dynamic placeholder integrations.
 
 ### 2. **AI Emergency Chat (Agent Visualizer)**
 - Uses a **Multi-Agent Pipeline** architecture (Router, Advisory, Checklist, Mapping).
 - **Agent Trace Visualizer**: Watch the AI "think" and execute actions in real-time.
 - **Structured Emergency Data**: Badges for Urgency and Disaster Type, with actionable advice.
-- **Voice Support**: Integrated STT (Microphone) and TTS (Speech Synthesis).
+- **Voice Support**: Integrated STT (Browser Web Speech API) and TTS (Browser SpeechSynthesis API).
 
 ### 3. **Live Relief Map**
 - Uses **OpenStreetMap** and **Overpass API** for 100% free location data.
@@ -32,12 +57,64 @@ ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps
 - Append last known location (GPS).
 - **Share Intents**: Web Share API, WhatsApp deep linking, and Clipboard copy.
 
+---
+
+## 🧠 Architecture
+
+```text
+User
+  ↓
+Next.js Frontend
+  ↓
+FastAPI Backend
+  ↓
+Router Agent
+  ↓
+Safety Agent ↔ Mapping Agent ↔ Checklist Agent ↔ Advisory Agent
+  ↓
+Google Gemini Free API
+```
+
+---
+
+## 📂 Folder Structure
+
+```text
+resq-ai/
+├── backend/          # FastAPI Python backend (Agents, Endpoints)
+├── frontend/         # Next.js 15 React frontend (UI, Pages, Components)
+├── README.md         # Project documentation
+├── PROJECT.md        # Project setup guidelines
+└── .gitignore        # Git ignore rules
+```
+
+---
+
 ## 🛠 Tech Stack
 
 - **Frontend**: Next.js 15, React, TailwindCSS, shadcn/ui, Framer Motion, React-Leaflet
-- **Backend**: FastAPI, Python, Uvicorn, Google Gemini Free API (`google-generativeai`)
-- **Database**: LocalStorage (Contacts), Supabase (Free Tier Ready)
+- **Backend**: FastAPI, Python, Uvicorn
+- **AI**: Google Gemini Free API (`google-generativeai`)
+- **Database**: LocalStorage (Contacts)
 - **Open Data**: OpenStreetMap, Overpass API, Open-Meteo
+
+---
+
+## 🔐 Environment Variables
+
+Never commit these files to version control. They are ignored in `.gitignore`.
+
+### Backend (`backend/.env`)
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
+### Frontend (`frontend/.env.local`)
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+---
 
 ## 🏃 Getting Started
 
@@ -71,6 +148,30 @@ ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps
    ```
 4. Run the development server: `npm run dev`
 5. Open `http://localhost:3000` in your browser.
+
+---
+
+## 🌍 Deployment
+
+Recommended free-tier hosting for this project:
+
+- **Frontend**: [Vercel](https://vercel.com/) (Free)
+- **Backend**: [Render](https://render.com/) (Free)
+- **Maps**: OpenStreetMap (Free)
+- **Weather**: Open-Meteo (Free)
+- **AI**: Google Gemini (Free API)
+
+---
+
+## 🔮 Future Improvements
+
+- Supabase Integration (Auth & DB)
+- Offline PWA Support
+- Volunteer Network & Check-in System
+- Admin Dashboard
+- Push Notifications
+
+---
 
 ## 🛡 License
 MIT License

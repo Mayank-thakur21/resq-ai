@@ -13,12 +13,29 @@
 
 <br />
 
+## 📸 Project Preview
+
+![Home Dashboard](docs/images/home.png)
+![AI Chat](docs/images/chat.png)
+![Interactive Map](docs/images/map.png)
+![Checklist](docs/images/checklist.png)
+![Emergency Contacts](docs/images/contacts.png)
+
+## 🎥 Demo GIF
+
+![Demo Animation](docs/images/demo.gif)
+
+---
+
 ## 📖 Table of Contents
+- [Project Preview](#-project-preview)
 - [Overview](#-overview)
 - [Why ResQ AI](#-why-resq-ai)
 - [Features](#-features)
-- [Architecture](#-architecture)
+- [Application Workflow](#-application-workflow)
 - [Multi-Agent Workflow](#-multi-agent-workflow)
+- [System Architecture](#-system-architecture)
+- [API Request Flow](#-api-request-flow)
 - [Tech Stack](#-tech-stack)
 - [Folder Structure](#-folder-structure)
 - [Environment Variables](#-environment-variables)
@@ -26,9 +43,8 @@
 - [API Endpoints](#-api-endpoints)
 - [Deployment](#-deployment)
 - [Security](#-security)
-- [Screenshots](#-screenshots)
 - [Demo](#-demo)
-- [Future Improvements](#-future-improvements)
+- [Roadmap](#-roadmap)
 - [Contributing](#-contributing)
 - [Acknowledgements](#-acknowledgements)
 - [License](#-license)
@@ -61,60 +77,111 @@ During natural disasters, individuals face immense challenges:
 
 ---
 
-## 🧠 Architecture
-ResQ AI operates on a modern decoupled architecture:
+## 🔄 Application Workflow
 
-```text
-User
-  ↓
-Next.js Frontend (UI & State)
-  ↓
-FastAPI Backend (REST API)
-  ↓
-Router Agent (Intent Classification)
-  ↓
-Safety Agent ↔ Mapping Agent ↔ Checklist Agent ↔ Advisory Agent
-  ↓
-Google Gemini Free API (LLM Orchestration)
-```
+User opens website
+↓
+Chooses emergency feature
+↓
+AI receives request
+↓
+Router Agent analyzes
+↓
+Specialized agents execute
+↓
+AI generates response
+↓
+Emergency advice displayed
+↓
+Map updated
+↓
+Voice response (if enabled)
 
 ---
 
 ## 🤖 Multi-Agent Workflow
-Our backend leverages a synchronized swarm of AI agents to handle crisis data:
-- **Router Agent**: Analyzes user input to classify the disaster type, urgency, and intent. It then delegates the task to the specialized agents below.
-- **Safety Agent**: Fetches and structures immediate, critical safety protocols based on the disaster type.
-- **Mapping Agent**: Queries OpenStreetMap (Overpass API) to locate the nearest emergency amenities based on GPS coordinates.
-- **Checklist Agent**: Dynamically generates tailored survival kits (e.g., "Flood Preparedness Kit").
-- **Advisory Agent**: Fetches real-time weather alerts via Open-Meteo and summarizes them into simple safety language.
-- **Translation Agent**: Ensures the final compiled response is delivered in the user's preferred language.
+
+Our backend leverages a synchronized swarm of AI agents to handle crisis data.
+
+```mermaid
+flowchart LR
+    User --> Router
+    Router --> SafetyAgent
+    Router --> MappingAgent
+    Router --> AdvisoryAgent
+    Router --> ChecklistAgent
+    Router --> TranslationAgent
+
+    SafetyAgent --> Gemini
+    ChecklistAgent --> Gemini
+    AdvisoryAgent --> Gemini
+    TranslationAgent --> Gemini
+
+    MappingAgent --> OpenStreetMap
+    AdvisoryAgent --> OpenMeteo
+
+    Gemini --> Router
+    OpenStreetMap --> Router
+    OpenMeteo --> Router
+    Router --> User
+```
+
+### AI Agent Descriptions
+- **Router Agent**: Determines request type, parses intent, and orchestrates other agents to compile the final structured response.
+- **Safety Agent**: Generates immediate, emergency guidance and survival protocols.
+- **Mapping Agent**: Finds nearby hospitals, shelters, police, and fire stations via OpenStreetMap.
+- **Checklist Agent**: Generates preparedness checklists tailored to specific disaster types.
+- **Advisory Agent**: Processes live disaster advisories and summarizes complex weather data.
+- **Translation Agent**: Translates emergency responses into the user's native language.
+
+---
+
+## 🧠 System Architecture
+
+```mermaid
+graph TD
+    User --> Frontend
+    Frontend --> FastAPI
+
+    FastAPI --> AI
+    FastAPI --> Maps
+    FastAPI --> Weather
+
+    AI --> Gemini
+    Maps --> OpenStreetMap
+    Weather --> Open-Meteo
+```
+
+---
+
+## ⚡ API Request Flow
+
+```mermaid
+sequenceDiagram
+    User->>Frontend: Ask Question
+    Frontend->>Backend: API Request
+    Backend->>Router Agent: Analyze
+    Router Agent->>Gemini: Generate Safety/Checklist
+    Router Agent->>Maps: Find Nearby Services
+    Router Agent->>Weather: Fetch Advisories
+    Backend->>Frontend: Structured Response
+    Frontend->>User: Display Results
+```
 
 ---
 
 ## 🛠 Tech Stack
 
-### Frontend
-- **Framework**: Next.js 15 (React)
-- **Styling**: TailwindCSS, shadcn/ui
-- **Animations**: Framer Motion
-- **Maps**: React-Leaflet
-
-### Backend
-- **Framework**: FastAPI (Python)
-- **Server**: Uvicorn
-
-### External APIs & Data
-- **AI**: Google Gemini Free API (`google-generativeai`)
-- **Maps/Geocoding**: OpenStreetMap, Overpass API, Nominatim
-- **Weather**: Open-Meteo
-- **Speech**: Browser Web Speech API & SpeechSynthesis
-
-### Database & Storage
-- **Storage**: LocalStorage (Contacts & Offline Data)
-
-### Recommended Deployment
-- **Frontend**: Vercel (Free)
-- **Backend**: Render (Free)
+| Layer | Technology |
+|-------|------------|
+| Frontend | Next.js, React |
+| Backend | FastAPI, Python, Uvicorn |
+| AI | Google Gemini Free API |
+| Maps | Leaflet, React-Leaflet, OpenStreetMap, Overpass API |
+| Weather | Open-Meteo |
+| Database | LocalStorage |
+| Styling | TailwindCSS, shadcn/ui |
+| Animations | Framer Motion |
 
 ---
 
@@ -123,6 +190,7 @@ Our backend leverages a synchronized swarm of AI agents to handle crisis data:
 resq-ai/
 ├── backend/          # FastAPI Python backend (Agents, Endpoints)
 ├── frontend/         # Next.js 15 React frontend (UI, Pages, Components)
+├── docs/             # Visual documentation and diagrams
 ├── README.md         # Project documentation
 ├── PROJECT.md        # Project setup guidelines
 └── .gitignore        # Git ignore rules
@@ -222,8 +290,11 @@ The backend exposes the following RESTful endpoints:
 
 ## 🚀 Deployment
 This project is optimized for free-tier hosting:
-- **Frontend**: Deploy `frontend/` on [Vercel](https://vercel.com/) for zero-config Next.js hosting.
-- **Backend**: Deploy `backend/` on [Render](https://render.com/) via a web service (using `uvicorn app.main:app --host 0.0.0.0 --port 10000`).
+- **Frontend**: [Vercel](https://vercel.com/) (Free)
+- **Backend**: [Render](https://render.com/) (Free)
+- **Maps**: OpenStreetMap (Free)
+- **Weather**: Open-Meteo (Free)
+- **AI**: Google Gemini (Free API)
 
 ---
 
@@ -235,29 +306,27 @@ Security and privacy are paramount in crisis situations:
 
 ---
 
-## 📸 Screenshots
-*(Coming Soon after hackathon submission)*
-- Home Dashboard
-- AI Chat
-- Relief Map
-- Smart Checklist
-- SOS Contacts
-
----
-
 ## 🎥 Demo
-- **Live Demo**: *(Coming Soon after deployment)*
-- **Demo Video**: *(Coming Soon)*
+- **Live Demo**: *(Coming Soon after hackathon submission)*
+- **Demo Video**: *(Coming Soon after hackathon submission)*
 
 ---
 
-## 🔮 Future Improvements
-While the MVP is complete, the following features are planned for future iterations:
-- **Offline PWA Support**: Ensuring users can access cached safety guides when cellular networks fail.
-- **Supabase Integration**: Moving contacts and profiles to a managed database with robust authentication.
-- **Volunteer Network**: A peer-to-peer check-in system for community rescue efforts.
-- **Admin Dashboard**: For local authorities to broadcast verified alerts.
-- **Push Notifications**: Real-time SMS or push alerts for imminent danger.
+## 🚀 Roadmap
+
+### Completed
+- AI Chat
+- Maps
+- Voice (STT & TTS)
+- Checklists (PDF Export)
+- Emergency Contacts
+
+### Future Improvements
+- Offline PWA Support
+- Volunteer Network
+- Push Notifications
+- Supabase Integration (Auth & DB)
+- Admin Dashboard
 
 ---
 
@@ -273,12 +342,14 @@ We welcome contributions from developers, designers, and crisis-management exper
 
 ## 🙏 Acknowledgements
 This project would not be possible without the incredible open-source tools and free APIs provided by:
-- **Google Gemini** (AI Orchestration)
-- **FastAPI & Next.js** (Core Frameworks)
-- **OpenStreetMap & Overpass API** (Relief Mapping)
-- **Open-Meteo** (Weather Advisories)
-- **Leaflet** (Map Rendering)
-- **Tailwind CSS & shadcn/ui** (Design System)
+- **Google Gemini**
+- **FastAPI**
+- **Next.js**
+- **OpenStreetMap**
+- **Open-Meteo**
+- **Leaflet**
+- **Tailwind CSS**
+- **shadcn/ui**
 
 ---
 

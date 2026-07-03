@@ -1,12 +1,13 @@
 import os
-from openai import AsyncOpenAI
+from g4f.client import AsyncClient
 from app.agents.safety_agent import get_safety_instructions
 from app.agents.mapping_agent import get_nearby_hospitals, get_nearby_shelters
 from app.agents.advisory_agent import fetch_weather_alerts, summarize_advisory
 from app.agents.checklist_agent import generate_checklist
 from app.agents.translation_agent import translate_text
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Use g4f (free alternative) instead of OpenAI
+client = AsyncClient()
 
 async def classify_disaster(message: str) -> dict:
     prompt = f"""
@@ -25,10 +26,17 @@ async def classify_disaster(message: str) -> dict:
             messages=[{"role": "system", "content": "You are a helpful assistant that outputs JSON."},
                       {"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.0
         )
         import json
-        return json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content
+        
+        # g4f might wrap JSON in markdown blocks, so clean it
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+            
+        return json.loads(content.strip())
     except Exception as e:
         print(f"Classification error: {e}")
         return {"disaster_type": "unknown", "urgency": "low", "intent": "other"}

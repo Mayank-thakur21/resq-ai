@@ -1,17 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+import os
+
+# Load environment variables first, before importing any agents
+load_dotenv()
+
 from app.api import router as api_router
 
-app = FastAPI(
-    title="ResQ AI API",
-    description="Backend API for ResQ AI Disaster Response Assistant",
-    version="1.0.0",
-)
+app = FastAPI(title="ResQ AI Backend", version="1.0.0")
 
-# CORS middleware to allow frontend requests
+# Allow all origins for the MVP
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For MVP, allow all. In production, restrict to frontend domain.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

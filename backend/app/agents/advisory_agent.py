@@ -1,8 +1,8 @@
 import httpx
-from openai import AsyncOpenAI
+from g4f.client import AsyncClient
 import os
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncClient()
 
 async def fetch_weather_alerts(lat: float, lon: float) -> str:
     """
@@ -35,9 +35,7 @@ async def summarize_advisory(raw_advisory: str, language: str = "en") -> str:
             messages=[
                 {"role": "system", "content": "You are a government advisory summarizer. Provide clear, simple language."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=100
+            ]
         )
         return response.choices[0].message.content
     except Exception as e:

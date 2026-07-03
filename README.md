@@ -4,7 +4,7 @@ ResQ AI is an AI-powered disaster response assistant that helps users before, du
 
 ## Tech Stack
 - **Frontend**: Next.js 15, React, TailwindCSS, shadcn/ui, Leaflet
-- **Backend**: FastAPI, Python, Uvicorn, OpenAI (or Gemini)
+- **Backend**: FastAPI, Python, Uvicorn, g4f (Free AI)
 - **Database**: Supabase (Free Tier)
 - **Maps**: OpenStreetMap & Overpass API (Free)
 - **Weather/Advisories**: Open-Meteo API (Free)
@@ -26,7 +26,7 @@ ResQ AI is an AI-powered disaster response assistant that helps users before, du
 2. Create a virtual environment: `python -m venv venv`
 3. Activate the virtual environment.
 4. Install dependencies: `pip install -r requirements.txt` (or install manually).
-5. Copy `.env.example` to `.env` and fill in your API keys (e.g., `OPENAI_API_KEY`).
+5. Copy `.env.example` to `.env` (No API keys needed for core AI functionality).
 6. Run the server: `uvicorn app.main:app --reload`
 
 ### Frontend Setup

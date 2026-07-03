@@ -1,7 +1,7 @@
-from openai import AsyncOpenAI
+from g4f.client import AsyncClient
 import os
 
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncClient()
 
 async def get_safety_instructions(disaster_type: str, location: dict = None) -> str:
     """
@@ -17,9 +17,7 @@ async def get_safety_instructions(disaster_type: str, location: dict = None) -> 
             messages=[
                 {"role": "system", "content": "You are a crisis response expert. Keep instructions brief, clear, and actionable. Use bullet points."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=150
+            ]
         )
         return response.choices[0].message.content
     except Exception as e:

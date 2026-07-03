@@ -11,7 +11,7 @@ ResQ AI is split into a **Next.js 15 Frontend** and a **FastAPI Python Backend**
 
 ## 3. Backend & AI Agents
 The backend uses a Clean Architecture routing model where a central `Router Agent` analyzes the user query and dispatches it to specific functional agents:
-1. **Safety Agent**: Fetches basic safety protocols (uses OpenAI gpt-4o-mini).
+1. **Safety Agent**: Fetches basic safety protocols (uses `g4f` for free LLM access).
 2. **Mapping Agent**: Uses OpenStreetMap Overpass API (free) to fetch coordinates of hospitals and shelters.
 3. **Checklist Agent**: Dynamically formulates supply lists tailored to a disaster.
 4. **Advisory Agent**: Uses Open-Meteo for free weather alerts and summarizes them via AI.

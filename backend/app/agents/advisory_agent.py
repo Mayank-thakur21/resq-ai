@@ -1,8 +1,8 @@
 import httpx
-from g4f.client import AsyncClient
 import os
+import google.generativeai as genai
 
-client = AsyncClient()
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 async def fetch_weather_alerts(lat: float, lon: float) -> str:
     """
@@ -30,14 +30,9 @@ async def summarize_advisory(raw_advisory: str, language: str = "en") -> str:
     prompt = f"Summarize this weather data into a simple safety advisory in {language}:\n\n{raw_advisory}"
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a government advisory summarizer. Provide clear, simple language."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await model.generate_content_async(prompt)
+        return response.text
     except Exception as e:
         print(f"Summarization Error: {e}")
         return raw_advisory

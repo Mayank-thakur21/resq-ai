@@ -35,8 +35,8 @@ ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps
 ## 🛠 Tech Stack
 
 - **Frontend**: Next.js 15, React, TailwindCSS, shadcn/ui, Framer Motion, React-Leaflet
-- **Backend**: FastAPI, Python, Uvicorn, g4f (GPT4Free)
-- **Database**: LocalStorage (Contacts), Supabase (Ready)
+- **Backend**: FastAPI, Python, Uvicorn, Google Gemini Free API (`google-generativeai`)
+- **Database**: LocalStorage (Contacts), Supabase (Free Tier Ready)
 - **Open Data**: OpenStreetMap, Overpass API, Open-Meteo
 
 ## 🏃 Getting Started
@@ -54,14 +54,23 @@ ResQ AI is a state-of-the-art, AI-powered disaster response assistant that helps
    .\venv\Scripts\Activate
    ```
 3. Install dependencies: `pip install -r requirements.txt`
-4. Run the server: `uvicorn app.main:app --reload`
+4. Copy the environment variables:
+   ```bash
+   cp .env.example .env
+   ```
+5. Get a [Free Google Gemini API Key](https://aistudio.google.com/) and paste it into `backend/.env`.
+6. Run the server: `uvicorn app.main:app --reload`
    *(Runs on `http://localhost:8000`)*
 
 ### Frontend Setup
 1. Navigate to the `frontend` directory.
 2. Install dependencies: `npm install`
-3. Run the development server: `npm run dev`
-4. Open `http://localhost:3000` in your browser.
+3. Copy the environment variables:
+   ```bash
+   cp .env.example .env.local
+   ```
+4. Run the development server: `npm run dev`
+5. Open `http://localhost:3000` in your browser.
 
 ## 🛡 License
 MIT License

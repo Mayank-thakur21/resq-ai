@@ -1,29 +1,20 @@
-from g4f.client import AsyncClient
 import os
 import json
+import google.generativeai as genai
 
-client = AsyncClient()
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 async def generate_checklist(disaster_type: str, language: str = "en") -> list:
     """
     Generates a disaster-specific emergency checklist.
     """
-    prompt = f"Generate a 5-item emergency kit checklist for a '{disaster_type}'. Language: {language}. Output ONLY a JSON array of strings."
+    prompt = f"Generate a 5-item emergency kit checklist for a '{disaster_type}'. Language: {language}. Output ONLY a JSON array of strings, for example: [\"Item 1\", \"Item 2\"]."
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a disaster preparedness expert. Output ONLY a valid JSON array."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        content = response.choices[0].message.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-            
+        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+        response = await model.generate_content_async(prompt)
+        content = response.text
+        
         data = json.loads(content.strip())
         if isinstance(data, dict):
             return data.get("checklist", [])

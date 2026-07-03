@@ -1,13 +1,13 @@
 import os
 import json
-from g4f.client import AsyncClient
+import google.generativeai as genai
 from app.agents.safety_agent import get_safety_instructions
 from app.agents.mapping_agent import get_nearby_hospitals, get_nearby_shelters
 from app.agents.advisory_agent import fetch_weather_alerts, summarize_advisory
 from app.agents.checklist_agent import generate_checklist
 from app.agents.translation_agent import translate_text
 
-client = AsyncClient()
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 async def classify_disaster(message: str) -> dict:
     prompt = f"""
@@ -20,18 +20,9 @@ async def classify_disaster(message: str) -> dict:
     - intent: (e.g., "seeking_help", "asking_info", "reporting", "other")
     """
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a helpful assistant that outputs JSON."},
-                      {"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-            
+        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+        response = await model.generate_content_async(prompt)
+        content = response.text
         return json.loads(content.strip())
     except Exception as e:
         print(f"Classification error: {e}")

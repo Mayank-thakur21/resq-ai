@@ -1,7 +1,7 @@
-from g4f.client import AsyncClient
 import os
+import google.generativeai as genai
 
-client = AsyncClient()
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 async def get_safety_instructions(disaster_type: str, location: dict = None) -> str:
     """
@@ -12,14 +12,12 @@ async def get_safety_instructions(disaster_type: str, location: dict = None) -> 
         prompt += f" Consider the general geographic context if applicable (Latitude: {location.get('lat')}, Longitude: {location.get('lon')})."
         
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a crisis response expert. Keep instructions brief, clear, and actionable. Use bullet points."},
-                {"role": "user", "content": prompt}
-            ]
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await model.generate_content_async(
+            prompt,
+            system_instruction="You are a crisis response expert. Keep instructions brief, clear, and actionable. Use bullet points."
         )
-        return response.choices[0].message.content
+        return response.text
     except Exception as e:
         print(f"Safety Agent Error: {e}")
         return "Stay calm. Follow local authority instructions. Move to safety if possible."

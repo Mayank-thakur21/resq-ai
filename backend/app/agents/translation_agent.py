@@ -1,7 +1,7 @@
-from g4f.client import AsyncClient
 import os
+import google.generativeai as genai
 
-client = AsyncClient()
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 async def translate_text(text: str, target_language: str) -> str:
     """
@@ -10,17 +10,12 @@ async def translate_text(text: str, target_language: str) -> str:
     if target_language.lower() in ["en", "english"]:
         return text
         
-    prompt = f"Translate the following text to {target_language}. Preserve the tone and urgency. Text: '{text}'"
+    prompt = f"Translate the following text to {target_language}. Preserve the tone and urgency. Text: '{text}'. Output ONLY the translated text."
     
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a professional crisis translator."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = await model.generate_content_async(prompt)
+        return response.text.strip()
     except Exception as e:
         print(f"Translation Error: {e}")
         return text

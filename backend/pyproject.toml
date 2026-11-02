@@ -1,0 +1,50 @@
+# ResQ AI backend — tooling configuration (ruff + pytest).
+#
+# Runtime dependencies are pinned in requirements.txt (and dev tooling in
+# requirements-dev.txt); this file only carries project metadata and tool config.
+
+[project]
+name = "resq-ai-backend"
+version = "2.0.0"
+description = "ResQ AI — multi-agent disaster response assistant (FastAPI backend)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency/parameter markers are designed to be used as defaults.
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.Query",
+    "fastapi.Security",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "conftest"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Our own code must not emit deprecation warnings.
+    "error::DeprecationWarning:app.*",
+]

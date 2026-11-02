@@ -1,9 +1,30 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-slowapi==0.1.9
-google-generativeai==0.7.2
-httpx==0.27.0
-pydantic==2.7.1
-python-dotenv==1.0.1
-twilio==9.2.3
-beautifulsoup4==4.12.3
+# ResQ AI backend — pinned runtime dependencies (Python 3.12 / 3.13).
+# Web framework
+fastapi==0.162.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.2
+pydantic-settings==2.16.2
+python-dotenv==1.2.4
+
+# HTTP client for upstream data providers (OpenWeatherMap, Open-Meteo, GDACS, ReliefWeb, Overpass)
+httpx==0.28.1
+
+# Persistence
+SQLAlchemy[asyncio]==2.1.6
+aiosqlite==0.22.1
+
+# AI (new Google Gen AI SDK — replaces google-generativeai)
+google-genai==2.34.0
+
+# Notifications
+twilio==9.12.0
+pywebpush==2.5.0
+py-vapid==1.9.6
+
+# Auth & security
+PyJWT==2.15.1
+bcrypt==5.0.0
+
+# Rate limiting (in-process moving window; see app/core/rate_limit.py for why not slowapi)
+limits==5.8.0

@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ResQ AI — frontend
 
-## Getting Started
+Next.js 15 (App Router, React 19, TypeScript strict, Tailwind 4) web app and PWA for ResQ AI.
 
-First, run the development server:
+**The full documentation lives in the [root README](../README.md)**: architecture, configuration
+(every environment variable), the API reference, auth / OAuth, PWA and push setup, Docker and
+troubleshooting.
+
+## Quick reference
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env.local   # then fill in the shared secrets (see the root README)
+npm ci
+npm run dev                  # http://localhost:3000 (needs the backend on BACKEND_URL)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+| Script              | What it does                                   |
+| ------------------- | ---------------------------------------------- |
+| `npm run dev`       | Development server                             |
+| `npm run build`     | Production build (`output: "standalone"`)      |
+| `npm start`         | Serve the production build                     |
+| `npm run lint`      | ESLint (`eslint .`)                            |
+| `npm run typecheck` | TypeScript (`tsc --noEmit`)                    |
+| `npm test`          | Vitest unit/component tests (`vitest run`)     |
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+`next build` needs `NEXTAUTH_SECRET`, `BACKEND_JWT_SECRET` and `NEXTAUTH_URL` in the environment
+(dummy values are fine for a build).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How the browser talks to the backend
 
-## Learn More
+The browser never calls FastAPI directly. Every data request goes to the same-origin proxy
+`/api/backend/<path>` (`app/api/backend/[...path]/route.ts`), which forwards it to
+`${BACKEND_URL}/api/<path>` at runtime and, when the user is signed in, attaches a short-lived
+backend JWT. Use the typed helpers in `lib/api.ts` (and `swrKeys` + the global SWR fetcher)
+instead of calling `fetch` yourself.
 
-To learn more about Next.js, take a look at the following resources:
+## Where things are
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `app/` — routes (each feature segment has its own `loading.tsx` and `error.tsx`)
+- `components/` — shared widgets (`WeatherCard`, `AlertBanner`, `PushToggle`, `SOSFab` ...) and
+  `components/ui/` primitives
+- `lib/` — API client, types mirroring the backend schemas, auth, geolocation, push, formatting
+- `public/sw.js` — hand-written service worker (offline pages, API/tile caching, push)
+- `public/icons/` — PWA icons generated from `public/icons/icon.svg`

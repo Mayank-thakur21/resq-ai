@@ -1,29 +1,53 @@
-# Environments
+# --- Environments / secrets --------------------------------------------------------------------
+# Real configuration never goes into git; only the documented *.env.example templates do.
 .env
 .env.*
 !.env.example
+*.pem
 
-# Node
+# --- Node / Next.js ----------------------------------------------------------------------------
 node_modules/
 dist/
 .next/
 out/
 build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.vercel/
 
-# Python
+# --- Python ------------------------------------------------------------------------------------
+.venv/
 venv/
+env/
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
 .Python
-env/
 pip-log.txt
 pip-delete-this-directory.txt
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
 htmlcov/
 
-# OS Files
+# --- Local data (SQLite default: backend/data/resq.db) -----------------------------------------
+backend/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Editors / OS ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
 .DS_Store
 Thumbs.db

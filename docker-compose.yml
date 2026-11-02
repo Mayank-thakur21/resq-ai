@@ -1,29 +1,130 @@
-version: "3.9"
+# ResQ AI - local / single-host deployment.
+#
+#   cp .env.example .env      # then fill in the three shared secrets (and any API keys)
+#   docker compose up --build -d
+#
+#   Web app:  http://localhost:3000        (nginx "proxy" -> Next.js "frontend")
+#   API docs: http://localhost:8000/docs   (published on 127.0.0.1 only)
+#
+# Requires Docker Compose v2.24+ (optional env_file). Shared secrets are read from the root
+# .env file (or the shell environment) and handed to both services so they always match.
+#
+# Only the "proxy" service is reachable from outside. It overwrites X-Forwarded-For with the
+# real client address (deploy/nginx/default.conf); Next.js trusts exactly that one hop
+# (TRUSTED_PROXY_HOPS=1). Exposing Next.js directly would let clients forge their address and
+# bypass per-client rate limits, so do not publish the frontend port.
+
+name: resq-ai
 
 services:
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
     env_file:
-      - ./backend/.env
-    restart: unless-stopped
+      # Every backend setting (API keys, Twilio, VAPID, rate limits...). Optional so the stack
+      # can also be configured purely from the shell environment.
+      - path: ./.env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      # Fixed: the SQLite database lives on the named volume below.
+      DATABASE_URL: sqlite+aiosqlite:////app/data/resq.db
+      BACKEND_JWT_SECRET: ${BACKEND_JWT_SECRET:?Set BACKEND_JWT_SECRET in .env (see .env.example)}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY in .env (see .env.example)}
+      # Push nearby GDACS Orange/Red disasters to subscribers (no-op until VAPID keys are set).
+      ALERT_POLLER_ENABLED: ${ALERT_POLLER_ENABLED:-true}
+    volumes:
+      - resq-data:/app/data
+    ports:
+      # Loopback only: browsers talk to the frontend, which proxies to the backend over the
+      # compose network. Remove the 127.0.0.1 prefix only if you really need remote access.
+      - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8000/api/health', timeout=4)"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
+      args:
+        # NEXT_PUBLIC_* values are inlined into the browser bundle at build time.
+        NEXT_PUBLIC_DEFAULT_LAT: ${NEXT_PUBLIC_DEFAULT_LAT:-}
+        NEXT_PUBLIC_DEFAULT_LON: ${NEXT_PUBLIC_DEFAULT_LON:-}
+        NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
     environment:
-      - NEXT_PUBLIC_API_URL=http://backend:8000
+      # Server-side only; read at runtime by the Next.js proxy and NextAuth.
+      BACKEND_URL: http://backend:8000
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env (see .env.example)}
+      BACKEND_JWT_SECRET: ${BACKEND_JWT_SECRET:?Set BACKEND_JWT_SECRET in .env (see .env.example)}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?Set INTERNAL_API_KEY in .env (see .env.example)}
+      # Optional OAuth providers (enabled only when both values are set).
+      GITHUB_ID: ${GITHUB_ID:-}
+      GITHUB_SECRET: ${GITHUB_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # The nginx "proxy" below is the one trusted hop that records the client address.
+      TRUSTED_PROXY_HOPS: ${FRONTEND_TRUSTED_PROXY_HOPS:-1}
+    # Not published: browsers reach Next.js only through the proxy service.
+    expose:
+      - "3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/', { signal: AbortSignal.timeout(4000) }).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  proxy:
+    image: nginxinc/nginx-unprivileged:1.28-alpine
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Load balancers trusted to report the client address (empty by default; see file).
+      - ./deploy/nginx/trusted-proxies.conf:/etc/nginx/resq-trusted-proxies.conf:ro
+    ports:
+      - "3000:8080"
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/nginx-health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  resq-data:

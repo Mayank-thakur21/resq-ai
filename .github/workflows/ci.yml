@@ -1,50 +1,159 @@
+# ResQ AI - continuous integration.
+#
+# backend  : ruff lint + format check + pytest (Python 3.12 and 3.13, no network in tests)
+# frontend : eslint + tsc + vitest + next build (Node 22)
+# docker   : builds both production images (never pushed) and smoke-tests them with
+#            docker compose once the backend and frontend jobs are green.
+
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
+
+# Superseded runs of the same branch/PR are cancelled, except on master where every commit
+# keeps its own result (the README badge tracks master).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  backend-lint:
+  backend:
+    name: Backend (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install ruff
-      - run: ruff check backend/
-        continue-on-error: true
+      - name: Check out
+        uses: actions/checkout@v6
 
-  frontend-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run lint
-        working-directory: frontend
-        continue-on-error: true
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
-  frontend-build:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff check)
+        run: ruff check .
+
+      - name: Format check (ruff format)
+        run: ruff format --check .
+
+      - name: Tests (pytest)
+        run: pytest -q
+
+  frontend:
+    name: Frontend (Node 22)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: "22"
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Type check (tsc)
+        run: npm run typecheck
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      - name: Production build (next build)
+        run: npm run build
         env:
-          NEXT_PUBLIC_API_URL: http://localhost:8000
+          # Dummy values: the build must not depend on real secrets.
+          NEXTAUTH_URL: http://localhost:3000
+          NEXTAUTH_SECRET: ci-dummy-nextauth-secret
+          BACKEND_JWT_SECRET: ci-dummy-backend-jwt-secret
+          BACKEND_URL: http://localhost:8000
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [backend, frontend]
+    env:
+      # Throw-away values for the compose smoke test only.
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ci-dummy-nextauth-secret-0123456789abcdef
+      BACKEND_JWT_SECRET: ci-dummy-backend-jwt-secret-0123456789abcdef
+      INTERNAL_API_KEY: ci-dummy-internal-api-key-0123456789abcdef
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Build backend image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: resq-ai-backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: resq-ai-frontend:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Smoke test (docker compose up --wait)
+        run: |
+          docker compose up --no-build --detach --wait --wait-timeout 180
+          curl --fail --silent --show-error http://127.0.0.1:8000/api/health
+          echo
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:3000/
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:3000/manifest.webmanifest
+
+      - name: Show container logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

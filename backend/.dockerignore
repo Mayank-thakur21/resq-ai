@@ -1,0 +1,46 @@
+# Keep the backend build context small and free of secrets / local state.
+# The Dockerfile only copies requirements.txt and app/, everything else is excluded here.
+
+# secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# local databases and runtime data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# virtualenvs
+.venv/
+venv/
+env/
+
+# Python caches and tooling output
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# tests are run in CI, not shipped in the image
+tests/
+
+# VCS, editors, OS files
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker files themselves
+Dockerfile
+.dockerignore

@@ -1,0 +1,35 @@
+# Keep the frontend build context small and free of secrets / local build output.
+# node_modules and .next are rebuilt inside the image from package-lock.json.
+
+# dependencies and build output
+node_modules/
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+
+# secrets and local configuration (NEXT_PUBLIC_* values are passed as build args instead)
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# VCS, editors, OS files, deployment metadata
+.git/
+.gitignore
+.vscode/
+.idea/
+.vercel/
+.DS_Store
+Thumbs.db
+*.pem
+
+# Docker files themselves
+Dockerfile
+.dockerignore

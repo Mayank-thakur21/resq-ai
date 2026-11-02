@@ -1,7 +1,9 @@
 # pyrefly: ignore [missing-import]
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Optional, List
 from app.models.schemas import (
-    ChatRequest, ChatResponse, ClassifyRequest, 
+    ChatRequest, ChatResponse, ClassifyRequest,
     ChecklistRequest, TranslateRequest
 )
 from app.agents.router_agent import process_chat, classify_disaster
@@ -9,8 +11,28 @@ from app.agents.mapping_agent import get_nearby_hospitals, get_nearby_shelters, 
 from app.agents.advisory_agent import fetch_weather_alerts, summarize_advisory
 from app.agents.checklist_agent import generate_checklist
 from app.agents.translation_agent import translate_text
+from app.agents.weather_agent import get_current_weather, get_disaster_alerts
+from app.agents.sos_agent import send_sos, get_sos_history
+from app.agents.incident_agent import report_incident, get_nearby_incidents, get_all_incidents, upvote_incident
 
 router = APIRouter()
+
+# ── Extra schemas ─────────────────────────────────────────────────────────────
+class SOSRequest(BaseModel):
+    lat: float
+    lon: float
+    message: str = "SOS! I need help!"
+    contact_numbers: Optional[List[str]] = []
+    user_name: str = "Anonymous"
+
+class IncidentRequest(BaseModel):
+    lat: float
+    lon: float
+    disaster_type: str
+    description: str
+    severity: str = "medium"
+    reporter_name: str = "Anonymous"
+    image_url: Optional[str] = None
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -66,3 +88,56 @@ async def get_checklist(request: ChecklistRequest):
 async def translate(request: TranslateRequest):
     translated = await translate_text(request.text, request.target_language)
     return {"translated_text": translated}
+
+# ── Real Weather ───────────────────────────────────────────────────────────────
+@router.get("/weather")
+async def get_weather(lat: float, lon: float):
+    """Get real-time weather for a location."""
+    weather = await get_current_weather(lat, lon)
+    alerts = await get_disaster_alerts(lat, lon)
+    return {"weather": weather, "alerts": alerts}
+
+# ── SOS ───────────────────────────────────────────────────────────────────────
+@router.post("/sos")
+async def trigger_sos(request: SOSRequest):
+    """Send SOS alert with location to emergency contacts via SMS."""
+    result = await send_sos(
+        lat=request.lat,
+        lon=request.lon,
+        message=request.message,
+        contact_numbers=request.contact_numbers,
+        user_name=request.user_name,
+    )
+    return result
+
+@router.get("/sos/history")
+async def sos_history():
+    """Get recent SOS events."""
+    return {"history": await get_sos_history()}
+
+# ── Incident Reporting ────────────────────────────────────────────────────────
+@router.post("/incidents")
+async def create_incident(request: IncidentRequest):
+    """Report a new disaster/emergency incident."""
+    incident = await report_incident(
+        lat=request.lat,
+        lon=request.lon,
+        disaster_type=request.disaster_type,
+        description=request.description,
+        severity=request.severity,
+        reporter_name=request.reporter_name,
+        image_url=request.image_url,
+    )
+    return incident
+
+@router.get("/incidents")
+async def list_incidents(lat: Optional[float] = None, lon: Optional[float] = None, radius: float = 50):
+    """List recent incidents, optionally filtered by location."""
+    if lat is not None and lon is not None:
+        return {"incidents": await get_nearby_incidents(lat, lon, radius)}
+    return {"incidents": await get_all_incidents()}
+
+@router.post("/incidents/{incident_id}/upvote")
+async def upvote(incident_id: str):
+    """Upvote an incident to increase credibility."""
+    return await upvote_incident(incident_id)

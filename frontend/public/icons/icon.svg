@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>ResQ AI</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.45" r="0.55">
+      <stop offset="0" stop-color="#dc2626" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#dc2626" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="shield" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#f87171"/>
+      <stop offset="0.45" stop-color="#dc2626"/>
+      <stop offset="1" stop-color="#991b1b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#glow)"/>
+  <g>
+    <path d="M256 76 L398 126 Q408 130 408 141 L408 236 C408 334 346 404 262 438 Q256 440.5 250 438 C166 404 104 334 104 236 L104 141 Q104 130 114 126 Z" fill="url(#shield)" stroke="#fca5a5" stroke-opacity="0.45" stroke-width="6" stroke-linejoin="round"/>
+    <rect x="226" y="166" width="60" height="176" rx="12" fill="#ffffff"/>
+    <rect x="168" y="224" width="176" height="60" rx="12" fill="#ffffff"/>
+  </g>
+</svg>

@@ -1,0 +1,53 @@
+{
+  "time": 23,
+  "href": "https://api.reliefweb.int/v2/reports?appname=resq-ai-test",
+  "links": {
+    "self": {"href": "https://api.reliefweb.int/v2/reports?appname=resq-ai-test"},
+    "next": {"href": "https://api.reliefweb.int/v2/reports?appname=resq-ai-test&offset=3&limit=3&preset=latest"}
+  },
+  "took": 4,
+  "totalCount": 812345,
+  "count": 3,
+  "data": [
+    {
+      "id": "4180123",
+      "score": 1,
+      "fields": {
+        "title": "Philippines: Typhoon Nakri - Flash Update No. 3 (2 November 2026)",
+        "url_alias": "https://reliefweb.int/report/philippines/philippines-typhoon-nakri-flash-update-no-3-2-november-2026",
+        "date": {"created": "2026-11-02T09:41:12+00:00"},
+        "source": [{"shortname": "OCHA"}],
+        "country": [{"name": "Philippines"}],
+        "disaster_type": [{"name": "Tropical Cyclone"}, {"name": "Flood"}],
+        "headline": {
+          "summary": "Typhoon Nakri made landfall over Catanduanes on 1 November. More than 410,000 people were pre-emptively evacuated across the Bicol Region."
+        }
+      },
+      "href": "https://api.reliefweb.int/v2/reports/4180123"
+    },
+    {
+      "id": "4179950",
+      "score": 1,
+      "fields": {
+        "title": "Japan: Earthquake - Nov 2026",
+        "date": {"created": "2026-11-01T22:30:00+00:00"},
+        "source": [{"shortname": "JRCS"}],
+        "country": [{"name": "Japan"}]
+      },
+      "href": "https://api.reliefweb.int/v2/reports/4179950"
+    },
+    {
+      "id": "4180098",
+      "score": 1,
+      "fields": {
+        "title": "India: Assam Floods &amp; Landslides - Situation Report No. 2",
+        "url_alias": "https://reliefweb.int/report/india/india-assam-floods-landslides-situation-report-no-2",
+        "date": {"created": "2026-11-01T17:05:00+00:00"},
+        "source": [{"shortname": "IFRC"}, {"shortname": "IRCS"}],
+        "country": [{"name": "India"}],
+        "disaster_type": [{"name": "Flood"}, {"name": "Land Slide"}]
+      },
+      "href": "https://api.reliefweb.int/v2/reports/4180098"
+    }
+  ]
+}

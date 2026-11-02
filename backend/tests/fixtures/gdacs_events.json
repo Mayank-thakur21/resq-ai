@@ -1,0 +1,232 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "bbox": [124.1, 11.4, 127.2, 14.8],
+      "geometry": {"type": "Point", "coordinates": [125.6, 13.1]},
+      "properties": {
+        "eventtype": "TC",
+        "eventid": 1001214,
+        "episodeid": 18,
+        "eventname": "NAKRI-26",
+        "glide": "TC-2026-000187-PHL",
+        "name": "Tropical Cyclone NAKRI-26",
+        "description": "Tropical Cyclone NAKRI-26",
+        "htmldescription": "Red Tropical Cyclone Alert for NAKRI-26 in Philippines, Viet Nam from 29 Oct 2026 00:00 UTC to 02 Nov 2026 06:00 UTC",
+        "icon": "https://www.gdacs.org/images/gdacs_icons/maps/Red/TC.png",
+        "iconoverall": "https://www.gdacs.org/images/gdacs_icons/maps/Red/TC.png",
+        "url": {
+          "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=TC&eventid=1001214&episodeid=18",
+          "report": "https://www.gdacs.org/report.aspx?eventid=1001214&episodeid=18&eventtype=TC",
+          "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=TC&eventid=1001214"
+        },
+        "alertlevel": "Red",
+        "alertscore": 3,
+        "episodealertlevel": "Red",
+        "episodealertscore": 2.5,
+        "istemporary": "false",
+        "iscurrent": "true",
+        "country": "Philippines, Viet Nam",
+        "fromdate": "2026-10-29T00:00:00",
+        "todate": "2026-11-02T06:00:00",
+        "datemodified": "2026-11-02T07:12:44",
+        "iso3": "PHL",
+        "source": "JTWC",
+        "sourceid": "",
+        "polygonlabel": "Centroid",
+        "Class": "Point_Centroid",
+        "affectedcountries": [
+          {"iso2": "PH", "iso3": "PHL", "countryname": "Philippines"},
+          {"iso2": "VN", "iso3": "VNM", "countryname": "Viet Nam"}
+        ],
+        "severitydata": {"severity": 213.0, "severitytext": "Typhoon (maximum wind speed of 213 km/h)", "severityunit": "km/h"}
+      }
+    },
+    {
+      "type": "Feature",
+      "bbox": [141.37, 37.3, 143.37, 39.3],
+      "geometry": {"type": "Point", "coordinates": [142.37, 38.3]},
+      "properties": {
+        "eventtype": "EQ",
+        "eventid": 1502861,
+        "episodeid": 1650012,
+        "eventname": "",
+        "glide": "",
+        "name": "Earthquake in Japan",
+        "description": "Earthquake in Japan",
+        "htmldescription": "Orange earthquake alert (Magnitude 6.8M, Depth:35km) in Japan 01/11/2026 14:12 UTC, 2.1 million people within 100km.",
+        "icon": "https://www.gdacs.org/images/gdacs_icons/maps/Orange/EQ.png",
+        "iconoverall": "https://www.gdacs.org/images/gdacs_icons/maps/Orange/EQ.png",
+        "url": {
+          "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=EQ&eventid=1502861&episodeid=1650012",
+          "report": "https://www.gdacs.org/report.aspx?eventid=1502861&episodeid=1650012&eventtype=EQ",
+          "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=EQ&eventid=1502861"
+        },
+        "alertlevel": "Orange",
+        "alertscore": 2,
+        "episodealertlevel": "Orange",
+        "episodealertscore": 1.6,
+        "istemporary": "false",
+        "iscurrent": "true",
+        "country": "Japan",
+        "fromdate": "2026-11-01T14:12:05",
+        "todate": "2026-11-01T14:12:05",
+        "datemodified": "2026-11-01T16:40:00",
+        "iso3": "JPN",
+        "source": "NEIC",
+        "sourceid": "us7000r2k9",
+        "polygonlabel": "Centroid",
+        "Class": "Point_Centroid",
+        "affectedcountries": [{"iso2": "JP", "iso3": "JPN", "countryname": "Japan"}],
+        "severitydata": {"severity": 6.8, "severitytext": "Magnitude 6.8M, Depth:35km", "severityunit": "M"}
+      }
+    },
+    {
+      "type": "Feature",
+      "bbox": [141.37, 37.3, 143.37, 39.3],
+      "geometry": {"type": "Point", "coordinates": [142.37, 38.3]},
+      "properties": {
+        "eventtype": "EQ",
+        "eventid": 1502861,
+        "episodeid": 1650001,
+        "name": "Earthquake in Japan",
+        "description": "Earthquake in Japan",
+        "htmldescription": "Green earthquake alert (Magnitude 6.5M, Depth:40km) in Japan 01/11/2026 14:12 UTC, 1.8 million people within 100km.",
+        "url": {
+          "report": "https://www.gdacs.org/report.aspx?eventid=1502861&episodeid=1650001&eventtype=EQ"
+        },
+        "alertlevel": "Green",
+        "iscurrent": "true",
+        "country": "Japan",
+        "fromdate": "2026-11-01T14:12:05",
+        "todate": "2026-11-01T14:12:05",
+        "iso3": "JPN",
+        "severitydata": {"severity": 6.5, "severitytext": "Magnitude 6.5M, Depth:40km", "severityunit": "M"}
+      }
+    },
+    {
+      "type": "Feature",
+      "bbox": [89.6, 25.2, 93.9, 27.1],
+      "geometry": {"type": "Point", "coordinates": [91.75, 26.14]},
+      "properties": {
+        "eventtype": "FL",
+        "eventid": 1103377,
+        "episodeid": 4,
+        "eventname": "",
+        "name": "Flood in India",
+        "description": "Flood in India",
+        "htmldescription": "Orange flood alert in India from 25 Oct 2026 to 01 Nov 2026. 14 fatalities and 52000 displaced reported in Assam.",
+        "url": {
+          "geometry": "https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?eventtype=FL&eventid=1103377&episodeid=4",
+          "report": "https://www.gdacs.org/report.aspx?eventid=1103377&episodeid=4&eventtype=FL",
+          "details": "https://www.gdacs.org/gdacsapi/api/events/geteventdata?eventtype=FL&eventid=1103377"
+        },
+        "alertlevel": "Orange",
+        "alertscore": 2,
+        "istemporary": "false",
+        "iscurrent": "true",
+        "country": "India",
+        "fromdate": "2026-10-25T00:00:00",
+        "todate": "2026-11-01T00:00:00",
+        "datemodified": "2026-11-01T09:05:13",
+        "iso3": "IND",
+        "source": "GLOFAS",
+        "affectedcountries": [{"iso2": "IN", "iso3": "IND", "countryname": "India"}],
+        "severitydata": {"severity": 0, "severitytext": "Medium impact", "severityunit": ""}
+      }
+    },
+    {
+      "type": "Feature",
+      "bbox": [33.9, -4.7, 41.9, 5.0],
+      "geometry": {"type": "Polygon", "coordinates": [[[33.9, -4.7], [41.9, -4.7], [41.9, 5.0], [33.9, 5.0], [33.9, -4.7]]]},
+      "properties": {
+        "eventtype": "DR",
+        "eventid": 1017020,
+        "episodeid": 9,
+        "name": "Drought in Kenya",
+        "description": "Drought in Kenya",
+        "htmldescription": "Orange drought alert in Kenya from 01 Jul 2026 onwards.",
+        "url": {
+          "report": "https://www.gdacs.org/report.aspx?eventid=1017020&episodeid=9&eventtype=DR"
+        },
+        "alertlevel": "Orange",
+        "alertscore": 2,
+        "iscurrent": "true",
+        "country": "Kenya",
+        "fromdate": "2026-07-01T00:00:00",
+        "todate": "2026-10-31T00:00:00",
+        "datemodified": "2026-10-31T12:00:00",
+        "iso3": "KEN",
+        "source": "JRC",
+        "affectedcountries": [{"iso2": "KE", "iso3": "KEN", "countryname": "Kenya"}],
+        "severitydata": {"severity": 0, "severitytext": "Medium impact", "severityunit": ""}
+      }
+    },
+    {
+      "type": "Feature",
+      "bbox": [122.27, -9.03, 123.27, -8.03],
+      "geometry": {"type": "Point", "coordinates": [122.775, -8.53]},
+      "properties": {
+        "eventtype": "VO",
+        "eventid": 1000094,
+        "episodeid": 37,
+        "eventname": "Lewotobi Laki-laki",
+        "name": "",
+        "description": "",
+        "htmldescription": "Green alert for volcanic eruption of Lewotobi Laki-laki in Indonesia (VEI 2).",
+        "url": {
+          "report": "https://www.gdacs.org/report.aspx?eventid=1000094&episodeid=37&eventtype=VO"
+        },
+        "alertlevel": "Green",
+        "alertscore": 1,
+        "iscurrent": "true",
+        "country": "Indonesia",
+        "fromdate": "2026-10-30T22:15:00",
+        "todate": "2026-10-31T03:00:00",
+        "iso3": "IDN",
+        "source": "SI",
+        "affectedcountries": [{"iso2": "ID", "iso3": "IDN", "countryname": "Indonesia"}],
+        "severitydata": {"severity": 2, "severitytext": "VEI 2", "severityunit": "VEI"}
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [-118.54, 34.31]},
+      "properties": {
+        "eventtype": "WF",
+        "eventid": 1024788,
+        "episodeid": 2,
+        "name": "Forest fire in United States",
+        "description": "Forest fire in United States",
+        "alertlevel": "Green",
+        "iscurrent": "false",
+        "country": "United States",
+        "fromdate": "2026-10-20T00:00:00",
+        "todate": "2026-10-24T00:00:00",
+        "iso3": "USA",
+        "source": "GWIS",
+        "severitydata": {"severity": 1820, "severitytext": "Burned area 1820 ha", "severityunit": "ha"}
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [10.2, 45.1]},
+      "properties": {
+        "eventid": 999,
+        "name": "Feature without an event type",
+        "alertlevel": "Green"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {"type": "Point", "coordinates": [250.0, 95.0]},
+      "properties": {
+        "eventtype": "EQ",
+        "eventid": 1502999,
+        "name": "Earthquake with corrupt coordinates",
+        "alertlevel": "Green"
+      }
+    }
+  ]
+}

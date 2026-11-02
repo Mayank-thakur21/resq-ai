@@ -1,0 +1,32 @@
+{
+  "lat": 28.61,
+  "lon": 77.21,
+  "timezone": "Asia/Kolkata",
+  "timezone_offset": 19800,
+  "alerts": [
+    {
+      "sender_name": "India Meteorological Department",
+      "event": "Thunderstorm Watch",
+      "start": 1793613600,
+      "end": 1793635200,
+      "description": "Thunderstorm with lightning and gusty winds (30-40 km/h) is likely at isolated places over Delhi NCR during the evening.",
+      "tags": ["Thunderstorm"]
+    },
+    {
+      "sender_name": "India Meteorological Department",
+      "event": "Severe Air Pollution Warning",
+      "start": 1793601000,
+      "end": 1793709000,
+      "description": "Air quality is expected to remain in the 'Severe' category over Delhi NCR.\nAvoid outdoor physical activity; sensitive groups should stay indoors.",
+      "tags": ["Air quality"]
+    },
+    {
+      "sender_name": "India Meteorological Department",
+      "event": "Dense Fog Statement",
+      "start": 1793664000,
+      "end": 1793678400,
+      "description": "Shallow to moderate fog is likely in the early morning hours.",
+      "tags": ["Fog"]
+    }
+  ]
+}

@@ -25,6 +25,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { writeUserData } from "@/lib/user-data";
+
 export interface Coordinates {
   lat: number;
   lon: number;
@@ -84,16 +86,17 @@ export interface LastKnownFix extends Coordinates {
   at: number;
 }
 
-/** Remembers a fix for offline use. Storage errors (private mode, quota) are ignored. */
+/**
+ * Remembers a fix for offline use. Storage errors (private mode, quota) are ignored: offline
+ * pages then fall back to the default location. Skipped while signing out (`lib/user-data.ts`):
+ * a watch can deliver a fix after sign-out has cleared the last one.
+ */
 export function rememberLastFix(coords: Coordinates, at: number = Date.now()): void {
-  try {
-    window.localStorage.setItem(
-      LAST_FIX_STORAGE_KEY,
-      JSON.stringify({ lat: coords.lat, lon: coords.lon, accuracy: coords.accuracy, at }),
-    );
-  } catch {
-    // Not fatal: offline pages fall back to the default location instead.
-  }
+  writeUserData(
+    "local",
+    LAST_FIX_STORAGE_KEY,
+    JSON.stringify({ lat: coords.lat, lon: coords.lon, accuracy: coords.accuracy, at }),
+  );
 }
 
 /** The remembered fix, or `null` when missing, malformed or older than `maxAgeMs`. */

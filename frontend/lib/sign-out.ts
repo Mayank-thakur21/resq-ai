@@ -21,6 +21,9 @@
  *   tied to the identity it was used under, so it never reaches another account.
  * - `components/SessionDataGuard.tsx` runs {@link forgetUserData} as well when a different
  *   account signs in on this device without signing out first (e.g. an expired session).
+ * - The page that signs out keeps running until the signed-out page has loaded, so the
+ *   writers of these entries skip their writes while a sign-out is under way
+ *   (`lib/user-data.ts`); otherwise a late chat answer or position fix would store them again.
  *
  * Device-level data that is not tied to an account (emergency contacts, checklist progress,
  * dismissed alerts, map preferences) is intentionally kept.
@@ -34,6 +37,7 @@ import { CHAT_HISTORY_STORAGE_KEY } from "@/app/chat/chat-helpers";
 import { LAST_FIX_STORAGE_KEY } from "@/lib/geo";
 import { PUSH_SYNCED_STORAGE_KEY, unlinkCurrentSubscription } from "@/lib/push";
 import { SOS_NAME_STORAGE_KEY } from "@/lib/sos-name";
+import { isSigningOut, setSigningOut } from "@/lib/user-data";
 
 /**
  * Mirrors `INCIDENT_DRAFT_KEY` (components/IncidentForm.tsx). Not imported from there so the
@@ -98,17 +102,13 @@ export async function forgetUserData(): Promise<void> {
   }
 }
 
-/** True while {@link signOutAndForget} runs; see there. */
-let signingOut = false;
-
 /**
- * Whether a sign-out is under way. `components/Providers.tsx` passes this to SWR as
- * `isPaused`, so no hook starts a request (e.g. the 60 s incidents refresh) with the session
- * that is about to end.
+ * Whether a sign-out is under way (the flag lives in `lib/user-data.ts`, where the per-user
+ * storage writers check it too). `components/Providers.tsx` passes this to SWR as `isPaused`,
+ * so no hook starts a request (e.g. the 60 s incidents refresh) with the session that is
+ * about to end.
  */
-export function isSigningOut(): boolean {
-  return signingOut;
-}
+export { isSigningOut };
 
 /**
  * Same-origin path to load after signing out; anything else (another origin, malformed)
@@ -145,9 +145,12 @@ function signedOutDestination(callbackUrl: string): string {
  *    when they land (`public/sw.js`). Every request the worker handles from here on is
  *    anonymous. This step runs even when 4 fails: whether the cookie survived is unknown.
  * 6. A full page load of `callbackUrl` (not a client-side transition) discards everything
- *    still held in memory: SWR's cache, React state, the paused flag. Should the browser
- *    later restore this page from its back/forward cache, it is reloaded instead of showing
- *    the previous account's data (with SWR still paused).
+ *    still held in memory: SWR's cache, React state, the paused flag. Until the next page has
+ *    loaded, this one keeps running: the flag also stops it from writing per-user storage
+ *    again (a chat answer or a position fix arriving late, `lib/user-data.ts`), which the
+ *    signed-out page would otherwise read. Should the browser later restore this page from
+ *    its back/forward cache, it is reloaded instead of showing the previous account's data
+ *    (with SWR still paused).
  *
  * Clearing only *before* the sign-out request (the previous order) left a window of seconds
  * in which a refresh, still authenticated, was cached under the new generation. Making the
@@ -160,7 +163,7 @@ function signedOutDestination(callbackUrl: string): string {
  * fails, so the caller can tell the user.
  */
 export async function signOutAndForget(callbackUrl = "/"): Promise<void> {
-  signingOut = true;
+  setSigningOut(true);
   let signedOut = false;
   try {
     await forgetUserData();
@@ -170,8 +173,8 @@ export async function signOutAndForget(callbackUrl = "/"): Promise<void> {
   } finally {
     // forgetUserData never rejects, so the sign-out error (if any) is what propagates.
     await forgetUserData();
-    // Failed: still signed in as far as we know, so the app may refresh again.
-    if (!signedOut) signingOut = false;
+    // Failed: still signed in as far as we know, so the app may refresh and store again.
+    if (!signedOut) setSigningOut(false);
   }
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) window.location.reload();

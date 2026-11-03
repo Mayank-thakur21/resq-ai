@@ -39,6 +39,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { createIncident, getErrorMessage, isApiError } from "@/lib/api";
 import { DISASTER_TYPES, SEVERITIES, type Incident, type IncidentInput, type LatLon } from "@/lib/types";
+import { writeUserData } from "@/lib/user-data";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------------------
@@ -139,12 +140,9 @@ function loadDraft(): Partial<IncidentFormValues> | null {
   }
 }
 
+/** Drafts are a convenience only; not saved while signing out (`lib/user-data.ts`). */
 function saveDraft(values: IncidentFormValues): void {
-  try {
-    window.sessionStorage.setItem(INCIDENT_DRAFT_KEY, JSON.stringify(values));
-  } catch {
-    // Storage unavailable: drafts are a convenience only.
-  }
+  writeUserData("session", INCIDENT_DRAFT_KEY, JSON.stringify(values));
 }
 
 function clearDraft(): void {

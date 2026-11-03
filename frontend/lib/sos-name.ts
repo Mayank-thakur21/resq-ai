@@ -10,6 +10,8 @@
  * A tiny module of its own so the Navbar's sign-out code does not pull in the SOS page.
  */
 
+import { writeUserData } from "@/lib/user-data";
+
 /** localStorage key: `{"name": string, "owner": string}`. */
 export const SOS_NAME_STORAGE_KEY = "resq_sos_name";
 
@@ -36,17 +38,12 @@ export function readSosName(owner: string): string {
   }
 }
 
-/** Remembers `name` for `owner` (an empty name forgets it); never throws. */
+/**
+ * Remembers `name` for `owner` (an empty name forgets it); never throws. Not remembered while
+ * signing out (`lib/user-data.ts`).
+ */
 export function storeSosName(name: string, owner: string): void {
-  try {
-    const clean = name.trim();
-    if (clean) {
-      const value: StoredSosName = { name: clean, owner };
-      window.localStorage.setItem(SOS_NAME_STORAGE_KEY, JSON.stringify(value));
-    } else {
-      window.localStorage.removeItem(SOS_NAME_STORAGE_KEY);
-    }
-  } catch {
-    // Storage unavailable: the name simply isn't remembered.
-  }
+  const clean = name.trim();
+  const value: StoredSosName = { name: clean, owner };
+  writeUserData("local", SOS_NAME_STORAGE_KEY, clean ? JSON.stringify(value) : null);
 }

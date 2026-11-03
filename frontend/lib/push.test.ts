@@ -17,6 +17,7 @@ import {
   unsubscribe,
   urlBase64ToUint8Array,
 } from "@/lib/push";
+import { setSigningOut } from "@/lib/user-data";
 
 // ---------------------------------------------------------------------------------------
 // Fakes: Notification, PushManager, service worker registration, backend (fetch)
@@ -386,6 +387,22 @@ describe("getPushStatus / resyncSubscription", () => {
     await expect(resyncSubscription({ identity: "user-a" })).resolves.toBe(false);
     await expect(resyncSubscription({ identity: null })).resolves.toBe(true);
     expect(callsTo("/api/backend/push/subscribe")).toHaveLength(calls + 1);
+  });
+
+  it("does not re-link the device or store the marker while signing out (review round 5)", async () => {
+    env.current = makeSubscription("https://push.example/x", KEY_BYTES);
+    window.localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({ radiusKm: 50, topics: ["incidents"] }));
+    setSigningOut(true);
+    try {
+      // The request would carry the ending session; its marker would outlive the sign-out.
+      await expect(resyncSubscription({ identity: "user-a" })).resolves.toBe(false);
+      expect(callsTo("/api/backend/push/subscribe")).toHaveLength(0);
+      expect(window.sessionStorage.getItem(PUSH_SYNCED_STORAGE_KEY)).toBeNull();
+    } finally {
+      setSigningOut(false);
+    }
+    await expect(resyncSubscription({ identity: "user-a" })).resolves.toBe(true);
+    expect(window.sessionStorage.getItem(PUSH_SYNCED_STORAGE_KEY)).toBe("https://push.example/x|user-a");
   });
 
   it("unlinkCurrentSubscription() detaches the device and forgets the marker", async () => {

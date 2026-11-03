@@ -2,9 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const auth = vi.hoisted(() => ({ signOut: vi.fn(async () => ({ url: "http://localhost:3000/" })) }));
+vi.mock("next-auth/react", () => ({ signOut: auth.signOut }));
+
 import ChatView from "@/app/chat/ChatView";
 import { CHAT_HISTORY_STORAGE_KEY } from "@/app/chat/chat-helpers";
+import { signOutAndForget } from "@/lib/sign-out";
 import type { ChatResponse } from "@/lib/types";
+import { setSigningOut } from "@/lib/user-data";
 
 const REPLY: ChatResponse = {
   response: "**Move to higher ground** now.",
@@ -38,9 +43,31 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window.navigator, "geolocation");
+  setSigningOut(false); // a successful sign-out leaves the page "signing out"
 });
 
 describe("ChatView", () => {
+  it("does not store the transcript again when an answer lands after sign-out (review round 5)", async () => {
+    // Regression: the answer re-rendered the old page before the signed-out one loaded, and
+    // the history effect wrote the whole transcript back into this tab's sessionStorage.
+    vi.stubGlobal("location", { origin: window.location.origin, href: window.location.href, assign: vi.fn(), reload: vi.fn() });
+    let deliver: (response: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (deliver = resolve)));
+    const user = userEvent.setup();
+    render(<ChatView />);
+
+    await user.type(screen.getByLabelText("Describe your situation"), "PRIVATE where can I go tonight?{Enter}");
+    await waitFor(() => expect(window.sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY)).toContain("PRIVATE"));
+
+    await signOutAndForget("/");
+    expect(window.sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY)).toBeNull();
+
+    deliver(jsonResponse(REPLY));
+    // The page still shows the answer until it is replaced, but stores nothing for the next one.
+    expect(await screen.findByText("Move to higher ground")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY)).toBeNull();
+  });
+
   it("sends a message through the API proxy and renders the agents' structured answer", async () => {
     const user = userEvent.setup();
     render(<ChatView />);

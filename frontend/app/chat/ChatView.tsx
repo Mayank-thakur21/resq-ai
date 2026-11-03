@@ -31,6 +31,7 @@ import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { chat, getErrorMessage, isApiError } from "@/lib/api";
 import { useGeolocation } from "@/lib/geo";
+import { writeUserData } from "@/lib/user-data";
 import { cn } from "@/lib/utils";
 
 const WELCOME: AssistantMessage = { id: "welcome", role: "assistant", content: WELCOME_MESSAGE, createdAt: 0 };
@@ -96,8 +97,10 @@ export default function ChatView() {
     setHydrated(true);
   }, []);
 
+  // Through the per-user guard: an answer that arrives while signing out must not write the
+  // transcript back after sign-out has cleared it (`lib/user-data.ts`).
   React.useEffect(() => {
-    if (hydrated) writeStorage("session", CHAT_HISTORY_STORAGE_KEY, serializeChatHistory(messages));
+    if (hydrated) writeUserData("session", CHAT_HISTORY_STORAGE_KEY, serializeChatHistory(messages));
   }, [messages, hydrated]);
 
   React.useEffect(() => {

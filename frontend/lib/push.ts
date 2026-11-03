@@ -33,6 +33,7 @@ import {
 } from "@/lib/api";
 import { serviceWorkerUrl } from "@/lib/sw-url";
 import type { PushSubscribeRequest, PushSubscribeResponse, PushTopic, WebPushSubscriptionJSON } from "@/lib/types";
+import { isSigningOut, writeUserData } from "@/lib/user-data";
 
 /**
  * Service worker script (served by `public/sw.js`, owned by the PWA feature). Same versioned
@@ -410,12 +411,9 @@ function syncMarker(endpoint: string, identity: string | null | undefined): stri
   return `${endpoint}|${identity || ANONYMOUS_PUSH_IDENTITY}`;
 }
 
+/** Not written while signing out (`lib/user-data.ts`), like the other per-user entries. */
 function markSynced(endpoint: string, identity: string | null | undefined): void {
-  try {
-    window.sessionStorage.setItem(SYNCED_STORAGE_KEY, syncMarker(endpoint, identity));
-  } catch {
-    // ignore
-  }
+  writeUserData("session", SYNCED_STORAGE_KEY, syncMarker(endpoint, identity));
 }
 
 function isSynced(endpoint: string, identity: string | null | undefined): boolean {
@@ -653,6 +651,9 @@ export async function unsubscribe(options: { request?: RequestOptions } = {}): P
 export async function resyncSubscription(
   options: { identity?: string | null; request?: RequestOptions } = {},
 ): Promise<boolean> {
+  // A re-link now would carry the session that is ending (and its marker would outlive the
+  // sign-out); the signed-out page re-syncs anonymously.
+  if (isSigningOut()) return false;
   try {
     const subscription = await getCurrentSubscription();
     if (!subscription || isSynced(subscription.endpoint, options.identity)) return false;

@@ -11,7 +11,10 @@ const auth = vi.hoisted(() => ({
 }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => router, usePathname: () => "/incidents/new" }));
-vi.mock("next-auth/react", () => ({ useSession: () => ({ data: auth.session, status: auth.status }) }));
+vi.mock("next-auth/react", () => ({
+  useSession: () => ({ data: auth.session, status: auth.status }),
+  signOut: vi.fn(async () => ({ url: "http://localhost:3000/" })),
+}));
 vi.mock("next/dynamic", async () => {
   const ReactModule = await import("react");
   return {
@@ -28,6 +31,8 @@ vi.mock("next/dynamic", async () => {
 
 import { INCIDENT_DRAFT_KEY, IncidentForm, validateIncidentForm } from "@/components/IncidentForm";
 import { errorResponse, jsonResponse, makeIncident, mockFetch } from "@/components/map/test-fixtures";
+import { signOutAndForget } from "@/lib/sign-out";
+import { setSigningOut } from "@/lib/user-data";
 
 beforeEach(() => {
   auth.session = { user: { id: "u1", name: "Asha Rao", email: "asha@example.com" } };
@@ -36,6 +41,7 @@ beforeEach(() => {
 
 afterEach(() => {
   window.sessionStorage.clear();
+  setSigningOut(false); // a successful sign-out leaves the page "signing out"
 });
 
 describe("validateIncidentForm", () => {
@@ -134,6 +140,21 @@ describe("IncidentForm", () => {
       severity: "critical",
       description: "Smoke pouring from the warehouse roof.",
     });
+    expect(window.sessionStorage.getItem(INCIDENT_DRAFT_KEY)).toBeNull();
+  });
+
+  it("does not save the draft again after sign-out (review round 5)", async () => {
+    // Regression: typing in the old page before the signed-out one loaded stored the
+    // previous user's text where the next page restores drafts from.
+    vi.stubGlobal("location", { origin: window.location.origin, href: window.location.href, assign: vi.fn(), reload: vi.fn() });
+    const user = userEvent.setup();
+    render(<IncidentForm />);
+    await user.type(screen.getByRole("textbox", { name: /Description/ }), "First words");
+    expect(window.sessionStorage.getItem(INCIDENT_DRAFT_KEY)).toContain("First words");
+
+    await signOutAndForget("/");
+    expect(window.sessionStorage.getItem(INCIDENT_DRAFT_KEY)).toBeNull();
+    await user.type(screen.getByRole("textbox", { name: /Description/ }), " and more");
     expect(window.sessionStorage.getItem(INCIDENT_DRAFT_KEY)).toBeNull();
   });
 

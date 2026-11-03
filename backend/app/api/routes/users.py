@@ -21,38 +21,53 @@ the internal key, see :func:`app.core.rate_limit.forwarded_client_ip`) and we ap
     successful sign-in clears it: earlier typos are forgiven),
   - :data:`VERIFY_FAILURES_PER_CLIENT` — one client spraying many accounts,
   - :data:`VERIFY_FAILURES_PER_ACCOUNT` — all clients together against one account
-    (distributed guessing). When it is exhausted, a burst of someone else's guesses must
+    (distributed guessing). When it is exhausted, a burst of someone else's guessing must
     not lock the owner out, so it still admits
 
-    + clients that signed in to the account successfully before (remembered for
-      :data:`KNOWN_CLIENT_MEMORY`), bounded only by their own failure buckets, and
+    + clients that recently signed in to the account successfully (the bounded
+      :data:`~app.core.rate_limit.known_clients` store: the last few clients per account,
+      for 14 days), bounded only by their own failure buckets, and
     + clients with fewer than :data:`ACCOUNT_LOCK_OWN_FAILURES` failures of their own,
       but only while the account's :data:`VERIFY_OVERFLOW_PER_ACCOUNT` bucket has room.
       That bucket bounds the escape hatch itself: an attacker who rotates through many
       networks (an IPv6 ``/48`` holds 65,536 ``/64`` subjects) gets at most
       ``VERIFY_FAILURES_PER_ACCOUNT + VERIFY_OVERFLOW_PER_ACCOUNT`` checks per hour, not
-      two per network. Once both are used up, a client the account has never signed in
-      from waits for the window (or uses OAuth).
+      two per network. Once both are used up, a client the account has not recently
+      signed in from waits for the window (or uses OAuth).
 
-  Every attempt, successful or not, also counts in :data:`VERIFY_ATTEMPTS_PER_CLIENT`
-  (never refunded, ``503`` answers included): correct passwords are cheap to send in a
-  loop and each one costs a bcrypt check, so without it a handful of clients could keep the
-  shared bcrypt queue full and every other sign-in would get ``503``.
+  Every attempt, successful or not, also counts in :data:`VERIFY_ATTEMPTS_PER_CLIENT` and,
+  for IPv6 clients, in :data:`VERIFY_ATTEMPTS_PER_PREFIX` for their whole ``/48`` (never
+  refunded, ``503`` answers included): correct passwords are cheap to send in a loop and
+  each one costs a bcrypt check, so without these a handful of clients could keep the
+  shared bcrypt queue full and every other sign-in would get ``503``. The ``/48`` bucket
+  stops one customer from multiplying the per-client budget by rotating its ``/64``
+  networks. Finally, :data:`VERIFY_SUCCESSES_PER_ACCOUNT` caps *successful* sign-ins per
+  account from all clients together: looping one valid account from many networks is the
+  cheapest flood, and only someone holding the password can use this budget up, so it can
+  never be used to lock out someone else.
 
-* ``/register`` — :data:`REGISTER_PER_CLIENT` per end client (bcrypt is expensive).
+* ``/register`` — :data:`REGISTER_PER_CLIENT` per end client and
+  :data:`REGISTER_PER_PREFIX` per IPv6 ``/48`` (bcrypt is expensive, and every account is
+  another SOS SMS budget).
 
 * Both — a client may have at most :data:`MAX_VERIFY_IN_FLIGHT_PER_CLIENT` requests in
-  flight (further concurrent ones get 429 at once). A client's first
-  :data:`QUIET_CLIENT_BCRYPT_JOBS` bcrypt jobs per minute (sign-ins and sign-ups together)
-  may use the whole bcrypt queue; busier clients leave
-  :data:`app.services.users.BCRYPT_RESERVED_FOR_QUIET` slots free, so someone signing in
-  for the first time is admitted even while busy clients keep the rest of the queue full.
+  flight, an IPv6 ``/48`` at most :data:`MAX_VERIFY_IN_FLIGHT_PER_PREFIX` (further
+  concurrent ones get 429 at once). A client's first :data:`QUIET_CLIENT_BCRYPT_JOBS`
+  bcrypt jobs per minute (sign-ins and sign-ups together) may use the whole bcrypt queue,
+  provided its ``/48`` has not run more than :data:`QUIET_PREFIX_BCRYPT_JOBS` either; busier
+  clients leave :data:`app.services.users.BCRYPT_RESERVED_FOR_QUIET` slots free, so someone
+  signing in for the first time is admitted even while busy clients keep the rest of the
+  queue full. Two invariants make that hold against a single ``/48`` however it rotates its
+  ``/64`` networks: its quiet jobs per minute stay below the reserve, and its requests in
+  flight stay below the unreserved part of the queue (tests pin both).
 
-Client addresses are bucketed with :func:`app.core.rate_limit.ip_bucket` (IPv6 by ``/64``).
-Per-client buckets are skipped when the client address is unknown (an older frontend that
-does not send ``X-ResQ-Client-IP``): sharing one bucket between all users would turn the
-limit into a site-wide lock-out. The account bucket then applies to every caller (without the
-escape hatch: nothing tells the owner apart from an attacker).
+Client addresses are bucketed with :func:`app.core.rate_limit.ip_bucket` (IPv6 by ``/64``)
+and, for the shared budgets above, :func:`app.core.rate_limit.ip_prefix_bucket` (IPv6 by
+``/48``; IPv4 clients have no wider bucket, so nothing changes for them). Per-client buckets
+are skipped when the client address is unknown (an older frontend that does not send
+``X-ResQ-Client-IP``): sharing one bucket between all users would turn the limit into a
+site-wide lock-out. The account buckets then apply to every caller (without the escape
+hatch: nothing tells the owner apart from an attacker).
 
 bcrypt itself is bounded too (see :mod:`app.services.users`): when its queue is full the
 request gets ``503 service_busy`` and the failure reservations are returned.
@@ -70,11 +85,14 @@ from app.core.errors import RateLimitExceeded, UnauthorizedError
 from app.core.rate_limit import (
     RETRY_AFTER_HEADER,
     ConcurrencyLimiter,
+    KnownClients,
     RateLimiter,
     RateLimitState,
     forwarded_client_ip,
     in_flight,
     ip_bucket,
+    ip_prefix_bucket,
+    known_clients,
     limiter,
 )
 from app.core.security import hash_identifier
@@ -97,17 +115,31 @@ VERIFY_FAILURES_PER_ACCOUNT = "100/hour"
 ACCOUNT_LOCK_OWN_FAILURES = 2
 #: ... but only this many of them per account in total (bounds the escape hatch).
 VERIFY_OVERFLOW_PER_ACCOUNT = "20/hour"
-#: How long a client that signed in successfully stays "known" to the account (such clients
-#: are admitted even when both account buckets are full). NextAuth sessions last 30 days.
-KNOWN_CLIENT_MEMORY = "1/30 days"
 #: Sign-in attempts per end client, successful ones and ``503`` answers included.
 VERIFY_ATTEMPTS_PER_CLIENT = "30/minute;600/hour"
+#: Sign-in attempts per IPv6 ``/48`` (all its ``/64`` clients together). Four times the
+#: per-client budget: a ``/48`` may be one customer rotating networks, but also a carrier
+#: pool shared by many people, and sign-ins are rare (sessions last 30 days).
+VERIFY_ATTEMPTS_PER_PREFIX = "120/minute;2400/hour"
+#: Successful sign-ins per account from all clients together. Each one costs a bcrypt
+#: check; people sign in a few times a month, so an hour's worth is far above normal use.
+VERIFY_SUCCESSES_PER_ACCOUNT = "30/hour"
 #: Registrations allowed per end client.
 REGISTER_PER_CLIENT = "5/minute;20/hour"
+#: Registrations allowed per IPv6 ``/48`` (all its ``/64`` clients together).
+REGISTER_PER_PREFIX = "20/minute;200/hour"
 #: Concurrent sign-in/registration requests per end client (the rest get 429 at once).
 MAX_VERIFY_IN_FLIGHT_PER_CLIENT = 4
+#: Concurrent sign-in/registration requests per IPv6 ``/48``. Must stay below the unreserved
+#: part of the bcrypt queue (``BCRYPT_MAX_PENDING - BCRYPT_RESERVED_FOR_QUIET`` = 24), so one
+#: ``/48`` can never fill it alone, whatever ``/64`` networks it rotates through.
+MAX_VERIFY_IN_FLIGHT_PER_PREFIX = 16
 #: bcrypt jobs per end client and minute that may use the reserved part of the bcrypt queue.
 QUIET_CLIENT_BCRYPT_JOBS = "3/minute"
+#: bcrypt jobs per IPv6 ``/48`` and minute that may use the reserved part of the queue. Must
+#: stay below ``BCRYPT_RESERVED_FOR_QUIET`` (8), so one ``/48`` can never occupy the whole
+#: reserve: without it, every fresh ``/64`` of a ``/48`` counted as a new "quiet" client.
+QUIET_PREFIX_BCRYPT_JOBS = "6/minute"
 #: Backwards-compatible alias (earlier versions counted every attempt per email).
 VERIFY_ATTEMPTS_PER_EMAIL = VERIFY_FAILURES_PER_ACCOUNT
 _INVALID_CREDENTIALS = "Invalid email or password."
@@ -118,9 +150,13 @@ _PAIR = "users-verify-pair"
 _CLIENT = "users-verify-client"
 _ACCOUNT = "users-verify-account"
 _OVERFLOW = "users-verify-overflow"
-_KNOWN = "users-verify-known"
 _ATTEMPTS = "users-verify-attempts"
+_ATTEMPTS_PREFIX = "users-verify-attempts-prefix"
+_SUCCESSES = "users-verify-successes"
+_REGISTER = "users-register"
+_REGISTER_PREFIX = "users-register-prefix"
 _RECENT = "users-bcrypt-recent"
+_RECENT_PREFIX = "users-bcrypt-recent-prefix"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +171,16 @@ class _Bucket:
         return self.identifiers[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _Client:
+    """Rate-limit subjects of the end client: its address bucket and its wider network."""
+
+    #: ``ip_bucket`` of the address (IPv6 by ``/64``).
+    subject: str
+    #: ``ip_prefix_bucket`` (IPv6 ``/48``); ``None`` for IPv4 (no wider bucket is counted).
+    prefix: str | None
+
+
 def _active_limiter(request: Request) -> RateLimiter | None:
     active: RateLimiter = getattr(request.app.state, "limiter", limiter)
     return active if active.enabled else None
@@ -146,10 +192,17 @@ def _keyed(request: Request, purpose: str, value: str) -> str:
     return hash_identifier(value, f"{purpose}:{secret}")
 
 
-def _client_subject(request: Request) -> str | None:
-    """Rate-limit subject of the end client (IPv6 by /64), ``None`` when unknown."""
-    client = forwarded_client_ip(request)
-    return ip_bucket(client) if client is not None else None
+def _compact(keyed_hash: str) -> bytes:
+    """First 128 bits of a :func:`_keyed` hash as bytes (a small key for long-lived state)."""
+    return bytes.fromhex(keyed_hash[:32])
+
+
+def _client(request: Request) -> _Client | None:
+    """Rate-limit subjects of the end client, ``None`` when its address is unknown."""
+    address = forwarded_client_ip(request)
+    if address is None:
+        return None
+    return _Client(subject=ip_bucket(address), prefix=ip_prefix_bucket(address))
 
 
 def _raise_limited(state: RateLimitState, message: str) -> None:
@@ -158,40 +211,65 @@ def _raise_limited(state: RateLimitState, message: str) -> None:
     raise RateLimitExceeded(message, headers=headers)
 
 
-def _is_quiet(active: RateLimiter, request: Request, subject: str | None) -> bool:
-    """Count one bcrypt job of ``subject``; ``True`` while it is among the first few.
+def _first_refusal(active: RateLimiter, buckets: list[_Bucket]) -> RateLimitState | None:
+    """Peek every bucket (nothing is counted); the state of the first full one, if any."""
+    for bucket in buckets:
+        state = active.peek(bucket.limit, *bucket.identifiers)
+        if not state.allowed:
+            logger.warning("Sign-in throttled (%s, %s)", bucket.kind, state.description)
+            return state
+    return None
 
-    Unknown clients (no reported address) cannot be told apart, so they keep the whole
-    queue, as before this distinction existed.
+
+def _is_quiet(active: RateLimiter, request: Request, client: _Client | None) -> bool:
+    """Count one bcrypt job of ``client``; ``True`` while it is among the first few.
+
+    Quiet means: the client's own subject *and* its IPv6 ``/48`` both still have room in
+    their per-minute budgets. Both are counted for every job (a busy ``/64`` still adds to
+    its ``/48``), so a ``/48`` rotating through fresh ``/64`` networks stops being quiet
+    after :data:`QUIET_PREFIX_BCRYPT_JOBS` jobs. Unknown clients (no reported address)
+    cannot be told apart, so they keep the whole queue, as before this distinction existed.
     """
-    if subject is None:
+    if client is None:
         return True
-    recent = _Bucket(QUIET_CLIENT_BCRYPT_JOBS, (_RECENT, _keyed(request, "bcrypt-recent", subject)))
-    return active.hit(recent.limit, *recent.identifiers).allowed
+    quiet = active.hit(
+        QUIET_CLIENT_BCRYPT_JOBS, _RECENT, _keyed(request, "bcrypt-recent", client.subject)
+    ).allowed
+    if client.prefix is not None:
+        prefix_quiet = active.hit(
+            QUIET_PREFIX_BCRYPT_JOBS,
+            _RECENT_PREFIX,
+            _keyed(request, "bcrypt-recent-prefix", client.prefix),
+        ).allowed
+        quiet = quiet and prefix_quiet
+    return quiet
 
 
 @dataclass(slots=True)
 class _Attempt:
-    """Reservations and the in-flight slot held by one ``/verify`` or ``/register`` call.
+    """Reservations and the in-flight slots held by one ``/verify`` or ``/register`` call.
 
     Exactly one of :meth:`succeeded`, :meth:`failed` or :meth:`abandoned` must be called
-    (``finally``), which returns the in-flight slot.
+    (``finally``), which returns the in-flight slots.
     """
 
     limiter: RateLimiter | None
     concurrency: ConcurrencyLimiter
-    in_flight_key: str | None = None
+    known_clients: KnownClients
+    in_flight_keys: list[str] = field(default_factory=list)
     #: Failure reservations (returned on success and when no verdict was reached).
     reserved: list[_Bucket] = field(default_factory=list)
-    #: Marker set on success: this client is now known to the account.
-    known_marker: _Bucket | None = None
+    #: Counted only when the password is correct (:data:`VERIFY_SUCCESSES_PER_ACCOUNT`).
+    success_bucket: _Bucket | None = None
+    #: ``(account, client)`` key remembered in :attr:`known_clients` on success.
+    known_key: tuple[bytes, bytes] | None = None
     #: May use the part of the bcrypt queue reserved for quiet clients.
     quiet: bool = True
 
-    def _release_slot(self) -> None:
-        if self.in_flight_key is not None:
-            self.concurrency.release(self.in_flight_key)
-            self.in_flight_key = None
+    def release_slots(self) -> None:
+        for key in self.in_flight_keys:
+            self.concurrency.release(key)
+        self.in_flight_keys.clear()
 
     def succeeded(self) -> None:
         """Correct password: reservations are returned and the pair counter is cleared."""
@@ -201,39 +279,60 @@ class _Attempt:
                     self.limiter.clear(bucket.limit, *bucket.identifiers)
                 else:
                     self.limiter.refund(bucket.limit, *bucket.identifiers)
-            if self.known_marker is not None:
-                # Restart the memory window at the latest success.
-                self.limiter.clear(self.known_marker.limit, *self.known_marker.identifiers)
-                self.limiter.hit(self.known_marker.limit, *self.known_marker.identifiers)
+            if self.success_bucket is not None:
+                # Counted after the fact, never reserved: a reservation would let pending
+                # wrong guesses (anyone's) fill the owner's success budget for a moment.
+                # Concurrent successes may therefore overshoot it by at most the requests
+                # in flight, which the bcrypt queue bounds.
+                self.limiter.hit(self.success_bucket.limit, *self.success_bucket.identifiers)
+            if self.known_key is not None:
+                self.known_clients.remember(*self.known_key)
         self.reserved.clear()
-        self._release_slot()
+        self.release_slots()
 
     def failed(self) -> None:
         """Wrong credentials: the reservations stay counted as failures."""
         self.reserved.clear()
-        self._release_slot()
+        self.release_slots()
 
     def abandoned(self) -> None:
         """No verdict (bcrypt busy, database error, cancelled): give the reservations back.
 
-        The per-client attempt counter is not part of them: it stays charged.
+        The per-client and per-prefix attempt counters are not part of them: they stay
+        charged.
         """
         if self.limiter is not None:
             for bucket in self.reserved:
                 self.limiter.refund(bucket.limit, *bucket.identifiers)
         self.reserved.clear()
-        self._release_slot()
+        self.release_slots()
 
 
-def _take_in_flight_slot(request: Request, attempt: _Attempt, subject: str | None) -> None:
-    """429 when the client already has :data:`MAX_VERIFY_IN_FLIGHT_PER_CLIENT` requests."""
-    if subject is None:
+def _take_in_flight_slots(request: Request, attempt: _Attempt, client: _Client | None) -> None:
+    """429 when the client (or its IPv6 ``/48``) already has its maximum of requests in flight.
+
+    Either both slots are taken or none.
+    """
+    if client is None:
         return
-    key = _keyed(request, "users-in-flight", subject)
-    if not attempt.concurrency.try_acquire(key, MAX_VERIFY_IN_FLIGHT_PER_CLIENT):
-        logger.warning("Too many concurrent sign-in requests from one client")
-        raise RateLimitExceeded(_TOO_MANY_SIGN_INS, headers={RETRY_AFTER_HEADER: "1"})
-    attempt.in_flight_key = key
+    slots = [(_keyed(request, "users-in-flight", client.subject), MAX_VERIFY_IN_FLIGHT_PER_CLIENT)]
+    if client.prefix is not None:
+        slots.append(
+            (
+                _keyed(request, "users-in-flight-prefix", client.prefix),
+                MAX_VERIFY_IN_FLIGHT_PER_PREFIX,
+            )
+        )
+    for key, maximum in slots:
+        if not attempt.concurrency.try_acquire(key, maximum):
+            attempt.release_slots()
+            logger.warning("Too many concurrent sign-in requests from one client or network")
+            raise RateLimitExceeded(_TOO_MANY_SIGN_INS, headers={RETRY_AFTER_HEADER: "1"})
+        attempt.in_flight_keys.append(key)
+
+
+def _new_attempt(active: RateLimiter | None) -> _Attempt:
+    return _Attempt(limiter=active, concurrency=in_flight, known_clients=known_clients)
 
 
 def _begin_verify(request: Request, email: str) -> _Attempt:
@@ -243,41 +342,42 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
     between, so concurrent attempts are counted one by one.
     """
     active = _active_limiter(request)
-    attempt = _Attempt(limiter=active, concurrency=in_flight)
+    attempt = _new_attempt(active)
     if active is None:
         return attempt
-    subject = _client_subject(request)
+    client = _client(request)
     account = _keyed(request, "verify-email", email)
     pair: _Bucket | None = None
     client_bucket: _Bucket | None = None
-    attempts: _Bucket | None = None
-    known: _Bucket | None = None
-    if subject is not None:
-        address = _keyed(request, "verify-client", subject)
+    #: Never refunded: every attempt costs a bcrypt check, whatever its outcome.
+    attempt_buckets: list[_Bucket] = []
+    if client is not None:
+        address = _keyed(request, "verify-client", client.subject)
         pair = _Bucket(VERIFY_FAILURES_PER_CLIENT_ACCOUNT, (_PAIR, address, account))
         client_bucket = _Bucket(VERIFY_FAILURES_PER_CLIENT, (_CLIENT, address))
-        attempts = _Bucket(VERIFY_ATTEMPTS_PER_CLIENT, (_ATTEMPTS, address))
-        known = _Bucket(KNOWN_CLIENT_MEMORY, (_KNOWN, address, account))
+        attempt_buckets.append(_Bucket(VERIFY_ATTEMPTS_PER_CLIENT, (_ATTEMPTS, address)))
+        if client.prefix is not None:
+            network = _keyed(request, "verify-prefix", client.prefix)
+            attempt_buckets.append(_Bucket(VERIFY_ATTEMPTS_PER_PREFIX, (_ATTEMPTS_PREFIX, network)))
+        attempt.known_key = (_compact(account), _compact(address))
     account_bucket = _Bucket(VERIFY_FAILURES_PER_ACCOUNT, (_ACCOUNT, account))
     overflow_bucket = _Bucket(VERIFY_OVERFLOW_PER_ACCOUNT, (_OVERFLOW, account))
+    success_bucket = _Bucket(VERIFY_SUCCESSES_PER_ACCOUNT, (_SUCCESSES, account))
 
-    _take_in_flight_slot(request, attempt, subject)
+    _take_in_flight_slots(request, attempt, client)
     try:
-        for bucket in (pair, client_bucket, attempts):
-            if bucket is None:
-                continue
-            state = active.peek(bucket.limit, *bucket.identifiers)
-            if not state.allowed:
-                logger.warning("Too many sign-ins (%s, %s)", bucket.kind, state.description)
-                _raise_limited(state, _TOO_MANY_SIGN_INS)
+        own_buckets = [bucket for bucket in (pair, client_bucket) if bucket is not None]
+        refusal = _first_refusal(active, [*own_buckets, *attempt_buckets, success_bucket])
+        if refusal is not None:
+            _raise_limited(refusal, _TOO_MANY_SIGN_INS)
 
-        to_reserve = [bucket for bucket in (pair, client_bucket) if bucket is not None]
+        to_reserve = list(own_buckets)
         account_state = active.peek(account_bucket.limit, *account_bucket.identifiers)
         if account_state.allowed:
             to_reserve.append(account_bucket)
-        elif known is not None and active.count(known.limit, *known.identifiers) > 0:
+        elif attempt.known_key is not None and attempt.known_clients.knows(*attempt.known_key):
             # Someone else's guessing filled the account bucket; this client signed in to
-            # the account before, so it may still try (bounded by its own failure buckets).
+            # the account recently, so it may still try (bounded by its own failure buckets).
             logger.info("Account sign-in bucket full; admitting a known client")
         else:
             own_failures = active.count(pair.limit, *pair.identifiers) if pair else None
@@ -300,10 +400,10 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
             # Cannot be refused: peeked above with no await in between.
             active.hit(bucket.limit, *bucket.identifiers)
             attempt.reserved.append(bucket)
-        if attempts is not None:
-            active.hit(attempts.limit, *attempts.identifiers)  # never refunded
-        attempt.known_marker = known
-        attempt.quiet = _is_quiet(active, request, subject)
+        for bucket in attempt_buckets:
+            active.hit(bucket.limit, *bucket.identifiers)  # never refunded
+        attempt.success_bucket = success_bucket
+        attempt.quiet = _is_quiet(active, request, client)
     except BaseException:
         attempt.abandoned()
         raise
@@ -311,21 +411,31 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
 
 
 def _begin_register(request: Request) -> _Attempt:
-    """Admit one registration (per-client rate + in-flight cap), 429 when not allowed."""
+    """Admit one registration (per-client and per-prefix rates, in-flight caps), else 429."""
     active = _active_limiter(request)
-    attempt = _Attempt(limiter=active, concurrency=in_flight)
-    subject = _client_subject(request)
-    if active is None or subject is None:
+    attempt = _new_attempt(active)
+    client = _client(request)
+    if active is None or client is None:
         return attempt
-    _take_in_flight_slot(request, attempt, subject)
-    bucket = _Bucket(REGISTER_PER_CLIENT, ("users-register", _keyed(request, "register", subject)))
-    state = active.hit(bucket.limit, *bucket.identifiers)
-    if not state.allowed:
+    buckets = [
+        _Bucket(REGISTER_PER_CLIENT, (_REGISTER, _keyed(request, "register", client.subject)))
+    ]
+    if client.prefix is not None:
+        network = _keyed(request, "register-prefix", client.prefix)
+        buckets.append(_Bucket(REGISTER_PER_PREFIX, (_REGISTER_PREFIX, network)))
+    _take_in_flight_slots(request, attempt, client)
+    try:
+        refusal = _first_refusal(active, buckets)
+        if refusal is not None:
+            _raise_limited(refusal, _TOO_MANY_SIGN_UPS)
+        # Registrations always count (successful ones too); only the in-flight slots are
+        # returned. Peeked above with no await in between, so these cannot be refused.
+        for bucket in buckets:
+            active.hit(bucket.limit, *bucket.identifiers)
+        attempt.quiet = _is_quiet(active, request, client)
+    except BaseException:
         attempt.abandoned()
-        logger.warning("Too many registrations from one client (%s)", state.description)
-        _raise_limited(state, _TOO_MANY_SIGN_UPS)
-    # Registrations always count (successful ones too); only the in-flight slot is returned.
-    attempt.quiet = _is_quiet(active, request, subject)
+        raise
     return attempt
 
 
@@ -344,7 +454,7 @@ async def register(body: UserRegisterRequest, request: Request, session: Session
             session, body.email, body.password, body.name, use_reserve=attempt.quiet
         )
     finally:
-        attempt.failed()  # keeps the registration counted, returns the in-flight slot
+        attempt.failed()  # keeps the registration counted, returns the in-flight slots
     return UserOut(id=user.id, email=user.email, name=user.name)
 
 

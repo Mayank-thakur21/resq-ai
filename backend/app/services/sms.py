@@ -29,16 +29,26 @@ Abuse budgets (checked and consumed atomically before a number is handed to Twil
 * ``SOS_SMS_PER_ADDRESS_LIMIT`` per client address (IPv6 by /64) for everyone sending from
   it, signed in or not — accounts are cheap to create (no email verification), so without
   it a dozen accounts registered from one address could spend the whole global budget;
+* ``SOS_SMS_PER_PREFIX_LIMIT`` per IPv6 ``/48`` (all its ``/64`` addresses together) — one
+  customer commonly holds a ``/48``, so without it accounts spread over its ``/64``
+  networks would each get a fresh per-address budget (IPv4 has no wider bucket);
 * ``SOS_SMS_ANONYMOUS_LIMIT`` for all anonymous callers together — a smaller pool, so
   anonymous traffic can never drain what signed-in users need;
+* ``SOS_SMS_NEW_CALLER_LIMIT`` for anonymous callers and recently registered accounts
+  together (``established=False``) — set below the global budget, so the rest of it stays
+  reserved for established accounts: brand-new accounts, however many and from however
+  many networks, cannot use up the whole budget;
 * ``SOS_SMS_GLOBAL_LIMIT`` for the whole server (caps the operator's Twilio bill). A
-  distributed caller (many addresses, many accounts) can still use it up: it is a bill
-  guard, and over budget every contact still gets the native-SMS fallback.
+  distributed caller (many addresses, many established accounts) can still use it up: it
+  is a bill guard, and over budget every contact still gets the native-SMS fallback.
 
 When Twilio *rejects* a message (``TwilioRestException``: invalid number, unroutable region,
-...), no message was created and nothing is billed, so the shared budgets (anonymous and
-global) are refunded; the caller's own and the destination's budgets stay charged. Sends
-cancelled before they started are refunded entirely.
+...), no message was created and nothing is billed, so the shared budgets (anonymous,
+new-caller and global) are refunded; the caller's own budgets (client, address, prefix) and
+the destination's stay charged. Sends cancelled before they started are refunded entirely.
+Each send is charged once in :meth:`SMSService._reserve` and settled exactly once in
+:meth:`SMSService.send_bulk` (sent, rejected, cancelled or unconfirmed), so no budget is
+ever refunded twice.
 
 Numbers over budget are reported in ``failed`` (the UI then offers the phone's own SMS app
 through ``fallback_sms_uri``) instead of failing the whole SOS.
@@ -98,7 +108,8 @@ NUMBER_BUDGET_ERROR = (
 CLIENT_BUDGET_ERROR = (
     "You have sent many SOS text messages recently. Send it from your phone's SMS app instead."
 )
-#: Shown when the budget of the caller's address (all its users together) is used up.
+#: Shown when the budget of the caller's address or IPv6 network (all its users together) is
+#: used up.
 ADDRESS_BUDGET_ERROR = (
     "Many SOS text messages were sent from your network recently. "
     "Send it from your phone's SMS app instead."
@@ -108,7 +119,8 @@ ANONYMOUS_BUDGET_ERROR = (
     "The SOS SMS service is at capacity for guests right now. "
     "Sign in, or send it from your phone's SMS app instead."
 )
-#: Shown when the server-wide SMS budget is used up.
+#: Shown when the server-wide SMS budget, or the part of it open to new callers, is used up
+#: (one text: the reserve for established accounts is not advertised).
 GLOBAL_BUDGET_ERROR = (
     "The SOS SMS service is at capacity right now. Send it from your phone's SMS app instead."
 )
@@ -129,8 +141,24 @@ class _Charge:
 
     limit: str
     identifiers: tuple[str, ...]
-    #: Shared budgets (anonymous pool, global) are refunded when Twilio rejects the message.
+    #: Shared budgets (anonymous pool, new-caller pool, global) are refunded when Twilio
+    #: rejects the message.
     shared: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Caller:
+    """Who is sending, as far as the budgets are concerned (see :meth:`SMSService.send_bulk`)."""
+
+    client_key: str | None
+    address_key: str | None
+    prefix_key: str | None
+    anonymous: bool
+    established: bool
+
+
+#: Budgets shared by the whole server: running out of them is logged as an error.
+_SERVER_WIDE_BUDGETS = frozenset({"sos-sms-global", "sos-sms-new-callers"})
 
 
 class BoundedTwilioHttpClient(TwilioHttpClient):
@@ -183,7 +211,7 @@ class SMSService:
     """Sends SOS SMS messages via Twilio.
 
     Args:
-        settings: Application settings (``TWILIO_*``, ``SOS_SMS_*_LIMIT``).
+        settings: Application settings (``TWILIO_*``, ``SOS_SMS_*``).
         client_factory: Optional factory for the Twilio client (tests inject fakes). The
             default builds ``twilio.rest.Client`` with a bounded request timeout.
         limiter: Rate limiter holding the SMS budgets (defaults to the process-wide one,
@@ -264,11 +292,14 @@ class SMSService:
     def _number_key(self, number: str) -> str:
         return self._hash("sos-sms-number", number)
 
-    def _budget_charges(
-        self, number: str, client_key: str | None, address_key: str | None, anonymous: bool
-    ) -> list[tuple[_Charge, str]]:
-        """Budgets a send to ``number`` counts against, each with its refusal message."""
+    def _budget_charges(self, number: str, caller: _Caller) -> list[tuple[_Charge, str]]:
+        """Budgets a send to ``number`` counts against, each with its refusal message.
+
+        Ordered from the narrowest to the widest, so a refusal names the most specific
+        reason (and is logged as such).
+        """
         settings = self.settings
+        client_key, address_key = caller.client_key, caller.address_key
         charges = [
             (
                 _Charge(
@@ -301,11 +332,31 @@ class SMSService:
                     ADDRESS_BUDGET_ERROR,
                 )
             )
-        if anonymous:
+        if caller.prefix_key:
+            charges.append(
+                (
+                    _Charge(
+                        settings.sos_sms_per_prefix_limit,
+                        ("sos-sms-prefix", self._hash("sos-sms-prefix", caller.prefix_key)),
+                        shared=False,
+                    ),
+                    ADDRESS_BUDGET_ERROR,
+                )
+            )
+        if caller.anonymous:
             charges.append(
                 (
                     _Charge(settings.sos_sms_anonymous_limit, ("sos-sms-anonymous",), shared=True),
                     ANONYMOUS_BUDGET_ERROR,
+                )
+            )
+        if not caller.established:
+            charges.append(
+                (
+                    _Charge(
+                        settings.sos_sms_new_caller_limit, ("sos-sms-new-callers",), shared=True
+                    ),
+                    GLOBAL_BUDGET_ERROR,
                 )
             )
         charges.append(
@@ -316,9 +367,7 @@ class SMSService:
         )
         return charges
 
-    def _reserve(
-        self, number: str, client_key: str | None, address_key: str | None, anonymous: bool
-    ) -> list[_Charge] | SMSFailed:
+    def _reserve(self, number: str, caller: _Caller) -> list[_Charge] | SMSFailed:
         """Count ``number`` against every budget, or an :class:`SMSFailed` when over one.
 
         Runs on the event loop without awaiting, so test-then-hit is atomic. All budgets
@@ -327,11 +376,13 @@ class SMSService:
         if not self._limiter.enabled:
             return []
         masked = mask_phone(number)
-        charges = self._budget_charges(number, client_key, address_key, anonymous)
+        charges = self._budget_charges(number, caller)
         for charge, error in charges:
             if not self._limiter.test(charge.limit, *charge.identifiers):
                 level = (
-                    logging.ERROR if charge.identifiers[0] == "sos-sms-global" else logging.WARNING
+                    logging.ERROR
+                    if charge.identifiers[0] in _SERVER_WIDE_BUDGETS
+                    else logging.WARNING
                 )
                 logger.log(
                     level, "SOS SMS to %s skipped: %s budget used up", masked, charge.identifiers[0]
@@ -379,7 +430,9 @@ class SMSService:
         *,
         client_key: str | None = None,
         address_key: str | None = None,
+        prefix_key: str | None = None,
         anonymous: bool = False,
+        established: bool = False,
     ) -> SMSResult:
         """Send ``body`` to every E.164 number; per-number failures are reported, not raised.
 
@@ -393,7 +446,12 @@ class SMSService:
             address_key: The caller's client address bucket (``ip:<bucket>``) for the
                 per-address budget, shared by every caller on that address; ``None`` (the
                 address is unknown) skips that budget.
+            prefix_key: The caller's IPv6 ``/48`` (``net:<prefix>``) for the per-prefix
+                budget; ``None`` (IPv4 or unknown address) skips that budget.
             anonymous: The caller is not signed in (also counts against the anonymous pool).
+            established: The caller is an established account; everyone else (anonymous
+                callers included) also counts against the new-caller pool and so cannot
+                use the part of the global budget reserved for established accounts.
 
         Results keep the input order and carry masked numbers. When Twilio is not
         configured nothing is sent and ``configured`` is ``False``. Returns within
@@ -407,6 +465,7 @@ class SMSService:
         if not unique:
             return SMSResult(configured=True)
 
+        caller = _Caller(client_key, address_key, prefix_key, anonymous, established)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.deadline_seconds
         executor = self._get_executor()
@@ -414,7 +473,7 @@ class SMSService:
         outcomes: dict[str, SMSSent | SMSFailed] = {}
         jobs: dict[str, tuple[Future[tuple[SMSSent | SMSFailed, bool]], list[_Charge]]] = {}
         for number in unique:
-            reserved = self._reserve(number, client_key, address_key, anonymous)
+            reserved = self._reserve(number, caller)
             if isinstance(reserved, SMSFailed):
                 outcomes[number] = reserved
                 continue

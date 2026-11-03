@@ -1050,3 +1050,330 @@ async def test_send_finished_just_before_the_deadline_is_classified_by_its_resul
         assert len(real.sent) == 1
     finally:
         service.close()
+
+
+# ----------------------------------------------------------------------------------------------
+# Review round 4: one IPv6 /48 shares one SMS budget; part of the global budget is reserved
+# for established accounts
+# ----------------------------------------------------------------------------------------------
+def _limiter_count(service: SMSService, limit: str, kind: str, key: str | None = None) -> int:
+    """Messages currently charged to one budget of ``service`` (``key`` before hashing)."""
+    identifiers = (kind,) if key is None else (kind, service._hash(kind, key))
+    return service._limiter.count(limit, *identifiers)
+
+
+async def test_sms_per_prefix_budget_is_shared_by_every_64_of_a_48(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    twilio = FakeTwilio()
+    settings = settings_factory(
+        **TWILIO_SETTINGS, sos_sms_per_address_limit="5/hour", sos_sms_per_prefix_limit="6/hour"
+    )
+    service = SMSService(settings, client_factory=lambda: twilio)
+    sent = 0
+    for user in range(4):  # four accounts, each on its own /64 of 2001:db8:77::/48
+        result = await service.send_bulk(
+            [f"+1415555{user}{i:03d}" for i in range(3)],
+            "x",
+            client_key=f"user:sybil{user}",
+            address_key=f"ip:2001:db8:77:{user:x}::/64",
+            prefix_key="net:2001:db8:77::/48",
+        )
+        sent += len(result.sent)
+        assert {f.error for f in result.failed} <= {sms_module.ADDRESS_BUDGET_ERROR}
+    assert sent == 6  # not 4 x 3 = 12: the per-address budget alone never binds here
+    other = await service.send_bulk(
+        [IN_NUMBER],
+        "help",
+        client_key="user:u1",
+        address_key="ip:2001:db8:78::/64",
+        prefix_key="net:2001:db8:78::/48",
+    )
+    assert len(other.sent) == 1
+
+
+def test_sms_prefix_key_is_the_48_for_ipv6_only(client: TestClient) -> None:
+    from starlette.requests import Request
+
+    def request_from(ip: str) -> Request:
+        headers = [(k.lower().encode(), v.encode()) for k, v in from_next(ip, "x").items()]
+        return Request({"type": "http", "headers": headers, "client": (ip, 1), "app": client.app})
+
+    assert sos_routes.sms_prefix_key(request_from("2001:db8:77:5::1"), signed_in=False) == (
+        "net:2001:db8:77::/48"
+    )
+    assert sos_routes.sms_prefix_key(request_from("203.0.113.7"), signed_in=False) is None
+    assert sos_routes.sms_prefix_key(request_from("::ffff:203.0.113.7"), signed_in=False) is None
+
+
+def test_sybil_accounts_on_one_48_cannot_drain_the_global_sms_budget(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    """Regression: the per-address budget reduced IPv6 to /64, so accounts on different /64s
+    of one /48 each got a fresh budget and together spent the whole global budget."""
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    settings = settings_factory(
+        **TWILIO_SETTINGS,
+        sos_sms_per_client_limit="10/hour",
+        sos_sms_per_address_limit="20/hour",
+        sos_sms_per_prefix_limit="25/hour",
+        sos_sms_global_limit="50/hour",
+    )
+    with TestClient(create_app(settings)) as client:
+        accepted = 0
+        for user in range(5):
+            numbers = [f"+1415555{user}{i:03d}" for i in range(10)]
+            response = client.post(
+                "/api/sos",
+                json=sos_payload(contact_numbers=numbers),
+                headers={
+                    **from_next(f"2001:db8:77:{user:x}::1", TEST_INTERNAL_KEY),
+                    "Authorization": f"Bearer {make_token(f'sybil{user}')}",
+                },
+            )
+            assert response.status_code == 200
+            accepted += len(response.json()["sms"]["sent"])
+        assert accepted == 25
+
+        real = client.post(
+            "/api/sos",
+            json=sos_payload(),
+            headers={
+                **from_next("198.51.100.20", TEST_INTERNAL_KEY),
+                "Authorization": f"Bearer {make_token('real-user')}",
+            },
+        ).json()
+    assert len(real["sms"]["sent"]) == 2
+    assert real["sms"]["failed"] == []
+
+
+async def test_new_callers_cannot_use_the_reserved_part_of_the_global_budget(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    twilio = FakeTwilio()
+    settings = settings_factory(
+        **TWILIO_SETTINGS, sos_sms_new_caller_limit="3/hour", sos_sms_global_limit="5/hour"
+    )
+    service = SMSService(settings, client_factory=lambda: twilio)
+    new = await service.send_bulk(
+        [f"+1415555{i:04d}" for i in range(5)], "x", client_key="user:fresh"
+    )
+    assert len(new.sent) == 3
+    assert {f.error for f in new.failed} == {sms_module.GLOBAL_BUDGET_ERROR}
+    guest = await service.send_bulk([IN_NUMBER], "help", client_key="ip:x", anonymous=True)
+    assert guest.failed == [SMSFailed(to="+91******3210", error=sms_module.GLOBAL_BUDGET_ERROR)]
+    # Established accounts can still use the reserve, up to the global budget.
+    old = await service.send_bulk(
+        [IN_NUMBER, US_NUMBER, "+14155550199"], "help", client_key="user:old", established=True
+    )
+    assert len(old.sent) == 2
+    assert old.failed == [SMSFailed(to="+14*****0199", error=sms_module.GLOBAL_BUDGET_ERROR)]
+    assert len(twilio.calls) == 5
+
+
+async def test_prefix_and_new_caller_budgets_are_settled_exactly_once(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rejected by Twilio: the shared budgets (new-caller pool, global) are refunded, the
+    caller's own (address, prefix) stay charged. Cancelled before sending: everything is
+    refunded. Unconfirmed at the deadline: everything stays charged. Never twice."""
+    from app.core.rate_limit import RateLimiter
+
+    monkeypatch.setattr(sms_module, "SMS_WORKER_THREADS", 1)
+    gate = threading.Event()
+    stuck = "+14155550111"
+
+    class MixedTwilio(FakeTwilio):
+        def create(self, **kwargs: Any) -> FakeMessage:
+            if kwargs["to"] == stuck:
+                gate.wait(timeout=5)
+            return super().create(**kwargs)
+
+    twilio = MixedTwilio(fail_with={BAD_NUMBER: invalid_number_error(BAD_NUMBER)})
+    settings = settings_factory(**TWILIO_SETTINGS)
+    service = SMSService(settings, client_factory=lambda: twilio, limiter=RateLimiter())
+    caller = {"client_key": "user:u1", "address_key": "ip:a", "prefix_key": "net:p"}
+
+    def counts() -> tuple[int, int, int, int]:
+        return (
+            _limiter_count(service, settings.sos_sms_per_address_limit, "sos-sms-address", "ip:a"),
+            _limiter_count(service, settings.sos_sms_per_prefix_limit, "sos-sms-prefix", "net:p"),
+            _limiter_count(service, settings.sos_sms_new_caller_limit, "sos-sms-new-callers"),
+            _limiter_count(service, settings.sos_sms_global_limit, "sos-sms-global"),
+        )
+
+    try:
+        first = await service.send_bulk([IN_NUMBER, BAD_NUMBER], "x", **caller)
+        assert len(first.sent) == 1
+        assert counts() == (2, 2, 1, 1)  # (address, prefix, new callers, global)
+
+        service.deadline_seconds = 0.2
+        second = await service.send_bulk([stuck, US_NUMBER], "x", **caller)
+        assert [f.error for f in second.failed] == [
+            sms_module.UNCONFIRMED_ERROR,
+            sms_module.NOT_SENT_IN_TIME_ERROR,
+        ]
+        assert counts() == (3, 3, 2, 2)  # the unconfirmed one counts, the cancelled one not
+    finally:
+        gate.set()
+        service.close()
+
+
+def _register_account(client: TestClient, email: str) -> str:
+    response = client.post(
+        "/api/users/register",
+        json={"email": email, "password": "correct horse 42", "name": "Asha"},
+        headers=from_next("198.51.100.40", TEST_INTERNAL_KEY),
+    )
+    assert response.status_code == 201, response.text
+    return str(response.json()["id"])
+
+
+def _backdate_account(client: TestClient, user_id: str, hours: float) -> None:
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.db.models import User
+
+    async def _update() -> None:
+        async with client.app.state.sessionmaker() as session:  # type: ignore[attr-defined]
+            when = datetime.now(UTC) - timedelta(hours=hours)
+            await session.execute(update(User).where(User.id == user_id).values(created_at=when))
+            await session.commit()
+
+    assert client.portal is not None
+    client.portal.call(_update)
+
+
+def test_sos_reserves_part_of_the_global_budget_for_established_accounts(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    """Regression: brand-new accounts (free, no email verification) spread over many networks
+    could use the whole global budget, so nobody's SOS was texted for the rest of the hour."""
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    settings = settings_factory(
+        **TWILIO_SETTINGS, sos_sms_new_caller_limit="1/hour", sos_sms_global_limit="4/hour"
+    )
+    numbers = iter(f"+1415555{i:04d}" for i in range(100))
+
+    def sos(token: str | None, count: int, ip: str) -> dict[str, Any]:
+        headers = from_next(ip, TEST_INTERNAL_KEY)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = sos_payload(contact_numbers=[next(numbers) for _ in range(count)])
+        response = client.post("/api/sos", json=payload, headers=headers)
+        assert response.status_code == 200
+        return response.json()["sms"]
+
+    with TestClient(create_app(settings)) as client:
+        fresh = _register_account(client, "fresh@example.com")
+        old = _register_account(client, "old@example.com")
+        _backdate_account(client, old, hours=settings.sos_sms_established_account_hours + 1)
+
+        new_account = sos(make_token(fresh), 2, "203.0.113.1")
+        assert len(new_account["sent"]) == 1  # the new-caller pool
+        assert [f["error"] for f in new_account["failed"]] == [sms_module.GLOBAL_BUDGET_ERROR]
+        assert sos(None, 1, "203.0.113.2")["sent"] == []  # anonymous callers are new too
+
+        assert len(sos(make_token(old), 2, "203.0.113.3")["sent"]) == 2  # the reserve
+        # OAuth identities have no account row here: their provider vetted them.
+        assert len(sos(make_token("github:4242"), 1, "203.0.113.4")["sent"]) == 1
+        assert sos(make_token("google:7"), 1, "203.0.113.5")["sent"] == []  # global is full
+
+
+def test_sos_established_account_hours_zero_trusts_every_signed_in_caller(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    settings = settings_factory(
+        **TWILIO_SETTINGS,
+        sos_sms_new_caller_limit="1/hour",
+        sos_sms_established_account_hours=0,
+    )
+    with TestClient(create_app(settings)) as client:
+        fresh = _register_account(client, "fresh@example.com")
+        body = client.post(
+            "/api/sos",
+            json=sos_payload(),
+            headers={
+                **from_next("203.0.113.1", TEST_INTERNAL_KEY),
+                "Authorization": f"Bearer {make_token(fresh)}",
+            },
+        ).json()
+    assert len(body["sms"]["sent"]) == 2
+
+
+def test_slow_account_age_lookup_never_delays_the_sos(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    """The lookup is bounded; past the bound the caller is treated as a new account (which
+    still gets SMS from the new-caller pool) and the lookup finishes in the background."""
+    import time
+
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    monkeypatch.setattr(sos_routes, "ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS", 0.1)
+    finished = threading.Event()
+
+    async def slow_lookup(*_: Any) -> None:
+        await asyncio.sleep(0.5)
+        finished.set()
+
+    monkeypatch.setattr(sos_routes, "_account_created_at", slow_lookup)
+    settings = settings_factory(**TWILIO_SETTINGS, sos_sms_new_caller_limit="1/hour")
+    with TestClient(create_app(settings)) as client:
+        started = time.monotonic()
+        body = client.post(
+            "/api/sos",
+            json=sos_payload(),
+            headers={
+                **from_next("203.0.113.1", TEST_INTERNAL_KEY),
+                "Authorization": f"Bearer {make_token('github:1')}",
+            },
+        ).json()
+        assert time.monotonic() - started < 0.45
+        assert len(body["sms"]["sent"]) == 1  # treated as new: one message from the pool
+        assert finished.wait(2)  # the lookup was not cancelled; it ended on its own
+
+
+def test_sos_bounds_stay_below_the_proxy_timeout() -> None:
+    from app.db import session as db_session
+
+    worst_case = (
+        sms_module.SEND_DEADLINE_SECONDS
+        + sos_routes.ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS
+        + max(sos_routes.AUDIT_WRITE_TIMEOUT_SECONDS, db_session.SQLITE_BUSY_TIMEOUT_SECONDS)
+    )
+    assert worst_case < 20 - 2  # with room for the request itself
+
+
+def test_default_sms_budgets_keep_a_reserve_and_a_wider_prefix_budget(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    from limits import parse_many
+
+    def amounts(limit: str) -> dict[int, int]:
+        return {item.get_expiry(): item.amount for item in parse_many(limit)}
+
+    settings = settings_factory()
+    new, total = amounts(settings.sos_sms_new_caller_limit), amounts(settings.sos_sms_global_limit)
+    assert new.keys() == total.keys()
+    assert all(new[window] < total[window] for window in total)  # a reserve in every window
+    prefix = amounts(settings.sos_sms_per_prefix_limit)
+    address = amounts(settings.sos_sms_per_address_limit)
+    assert all(prefix[window] > address[window] for window in address)
+    # A genuine first-time SOS (10 contacts) always fits the budgets a fresh address has.
+    assert min(prefix.values()) >= 10
+    assert min(new.values()) >= 10

@@ -83,14 +83,29 @@ class Settings(BaseSettings):
     # Twilio SMS per destination number (keyed by a hash of the number).
     sos_sms_per_number_limit: str = "3/hour;10/day"
     # Twilio SMS per caller (signed-in user id, else client address with IPv6 by /64), so one
-    # caller cannot drain the shared budgets below with made-up numbers.
+    # caller cannot drain the shared budgets below with made-up numbers. A send must fit
+    # every budget that applies to it; refused numbers get the native-SMS fallback.
     sos_sms_per_client_limit: str = "30/hour;100/day"
     # Twilio SMS per client address (IPv6 by /64) for everyone sending from it, signed in or
     # not, so a pile of cheap accounts created on one address shares one budget.
     sos_sms_per_address_limit: str = "60/hour;200/day"
+    # Twilio SMS per IPv6 /48 network (all its /64 addresses, signed in or not), so one
+    # customer rotating through the /64 networks of its /48 shares one budget. Higher than
+    # the per-address budget: a /48 may also be a carrier pool shared by many people.
+    # IPv4 addresses have no wider bucket (the per-address budget applies).
+    sos_sms_per_prefix_limit: str = "150/hour;600/day"
     # Twilio SMS for all anonymous callers together (a part of the global budget that
     # anonymous traffic may use; it can never take more than this).
     sos_sms_anonymous_limit: str = "200/hour;1000/day"
+    # Twilio SMS for "new" callers together: anonymous callers and email/password accounts
+    # registered less than SOS_SMS_ESTABLISHED_ACCOUNT_HOURS ago. Counted inside the global
+    # budget and kept below it: the difference (100/hour, 600/day by default) stays reserved
+    # for established accounts, so a pile of freshly registered accounts cannot use it all.
+    sos_sms_new_caller_limit: str = "400/hour;2400/day"
+    # Age (hours since registration) from which an email/password account is established.
+    # OAuth sign-ins have no account here (the provider vetted it) and count as established;
+    # 0 treats every signed-in caller as established.
+    sos_sms_established_account_hours: int = Field(default=24, ge=0, le=24 * 365)
     # Twilio SMS for the whole server (caps the operator's bill whatever the callers do).
     sos_sms_global_limit: str = "500/hour;3000/day"
     # true = only signed-in users get SOS SMS through Twilio; anonymous callers receive the
@@ -143,7 +158,9 @@ class Settings(BaseSettings):
         "sos_sms_per_number_limit",
         "sos_sms_per_client_limit",
         "sos_sms_per_address_limit",
+        "sos_sms_per_prefix_limit",
         "sos_sms_anonymous_limit",
+        "sos_sms_new_caller_limit",
         "sos_sms_global_limit",
         "incident_rate_limit",
     )

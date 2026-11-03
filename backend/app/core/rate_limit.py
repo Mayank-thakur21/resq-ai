@@ -28,6 +28,9 @@ How it is wired
   token is present, else the client IP from :func:`client_ip` reduced by :func:`ip_bucket`
   (IPv4 addresses as-is, IPv6 addresses by their ``/64`` network: one subscriber line or
   cloud host controls a whole ``/64`` and could otherwise pick a fresh bucket per request).
+  Budgets shared by everyone (sign-in attempts and the bcrypt reserve, SOS SMS) also count
+  IPv6 clients per ``/48`` (:func:`ip_prefix_bucket`) with higher limits, because one
+  customer often holds a ``/48`` or ``/56`` and could rotate through its ``/64`` networks.
 * :func:`client_ip` never trusts a client-supplied address. It uses, in this order:
 
   1. ``X-ResQ-Client-IP`` — only when the request also carries a valid ``X-Internal-Key``,
@@ -58,6 +61,7 @@ import logging
 import math
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -263,12 +267,103 @@ class ConcurrencyLimiter:
             self._counts.clear()
 
 
+class KnownClients:
+    """Bounded memory of the clients each account recently signed in from successfully.
+
+    The sign-in throttle admits such a client even while someone else's guessing has
+    filled the account's failure buckets (:mod:`app.api.routes.users`). Earlier versions
+    kept one marker per (account, client) in :class:`RateLimiter` storage for 30 days with
+    no cap (~525 bytes each), so a client rotating through IPv6 ``/64`` networks while
+    signing in successfully could grow memory without bound. This store is bounded instead:
+
+    * at most :attr:`per_account` clients per account (the most recently successful ones);
+    * at most :attr:`max_accounts` accounts, the least recently successful one evicted first;
+    * entries older than :attr:`ttl_seconds` are ignored and dropped when next looked at
+      (lazily: no sweeper task; the caps above bound memory in the meantime).
+
+    Only a *successful* sign-in adds an entry, so nobody can push the owner's own clients
+    out of an account without its password. Evicting a whole account takes successful
+    sign-ins to ``max_accounts`` other accounts; its owner then falls back to the bounded
+    overflow escape hatch of the sign-in throttle, so the worst case is a slower sign-in,
+    never a lock-out of the owner's other options.
+
+    Keys are opaque ``bytes`` (callers pass short keyed digests, never raw emails or
+    addresses). Thread-safe; every operation is O(per_account).
+    """
+
+    def __init__(
+        self,
+        *,
+        per_account: int,
+        max_accounts: int,
+        ttl_seconds: float,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.per_account = per_account
+        self.max_accounts = max_accounts
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
+        # account -> {client: last success (epoch seconds)}; both dicts oldest first.
+        self._accounts: OrderedDict[bytes, dict[bytes, float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def remember(self, account: bytes, client: bytes) -> None:
+        """Record a successful sign-in of ``client`` to ``account`` (now)."""
+        now = self._clock()
+        with self._lock:
+            clients = self._accounts.pop(account, None)
+            if clients is None:
+                clients = {}
+            clients.pop(client, None)  # re-insert so it becomes the newest
+            clients[client] = now
+            while len(clients) > self.per_account:
+                del clients[next(iter(clients))]
+            self._accounts[account] = clients
+            while len(self._accounts) > self.max_accounts:
+                self._accounts.popitem(last=False)
+
+    def knows(self, account: bytes, client: bytes) -> bool:
+        """``True`` when ``client`` signed in to ``account`` within :attr:`ttl_seconds`."""
+        now = self._clock()
+        with self._lock:
+            clients = self._accounts.get(account)
+            seen = clients.get(client) if clients else None
+            if clients is None or seen is None:
+                return False
+            if now - seen <= self.ttl_seconds:
+                return True
+            # Expired: forget it now (lazy expiry), and the account once it has no clients.
+            del clients[client]
+            if not clients:
+                del self._accounts[account]
+            return False
+
+    def __len__(self) -> int:
+        """Accounts currently remembered."""
+        with self._lock:
+            return len(self._accounts)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._accounts.clear()
+
+
 #: Process-wide limiter (also exposed as ``app.state.limiter``).
 limiter = RateLimiter()
 #: Process-wide in-flight counters (see :class:`ConcurrencyLimiter`).
 in_flight = ConcurrencyLimiter()
+#: Clients that signed in successfully, per account (see :class:`KnownClients`). Remembered
+#: for 14 days: long enough to cover how often people sign in again (NextAuth sessions last
+#: 30 days, but each device signs in once per session), short enough to keep little state.
+known_clients = KnownClients(per_account=8, max_accounts=50_000, ttl_seconds=14 * 86_400)
 #: IPv6 clients share one bucket per network of this prefix length (one subscriber line).
 IPV6_BUCKET_PREFIX = 64
+#: Wider IPv6 network counted *in addition* for the shared budgets (sign-in attempts, the
+#: bcrypt reserve, SOS SMS): ISPs and hosting providers commonly hand one customer a ``/48``
+#: or ``/56``, i.e. 256 to 65,536 ``/64`` subjects, so per-``/64`` limits alone can be
+#: multiplied by rotating networks. Limits on this bucket are set well above the ``/64``
+#: ones because a ``/48`` may also be shared by many unrelated users of one carrier.
+IPV6_PREFIX_BUCKET = 48
 
 
 def normalise_ip(value: str | None) -> str | None:
@@ -311,6 +406,23 @@ def ip_bucket(address: str) -> str:
             return str(parsed.ipv4_mapped)
         return str(ipaddress.IPv6Network((parsed, IPV6_BUCKET_PREFIX), strict=False))
     return str(parsed)
+
+
+def ip_prefix_bucket(address: str) -> str | None:
+    """The wider network of an IPv6 client (``/48``, see :data:`IPV6_PREFIX_BUCKET`).
+
+    ``2001:db8:77:1234::1`` -> ``2001:db8:77::/48``. ``None`` for IPv4 addresses (including
+    IPv4-mapped IPv6) and anything that is not an address: there the per-address subject of
+    :func:`ip_bucket` is already the whole client, so no wider bucket is counted and nothing
+    changes for IPv4 callers.
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    if not isinstance(parsed, ipaddress.IPv6Address) or parsed.ipv4_mapped is not None:
+        return None
+    return str(ipaddress.IPv6Network((parsed, IPV6_PREFIX_BUCKET), strict=False))
 
 
 def is_internal_caller(request: Request) -> bool:
@@ -451,6 +563,7 @@ def reset_rate_limits() -> None:
     """Clear all counters (tests call this before every test)."""
     limiter.reset()
     in_flight.reset()
+    known_clients.reset()
 
 
 def setup_rate_limiting(app: FastAPI, settings: Settings) -> None:

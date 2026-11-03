@@ -7,12 +7,15 @@ Flow of an SOS:
 2. Send it to every contact through Twilio (:class:`~app.services.sms.SMSService`) — when
    Twilio is not configured nothing is sent and the UI uses ``fallback_sms_uri`` to open the
    phone's native SMS app instead. Twilio sends are bounded per destination number, per
-   caller, per client address (all accounts on it together), for anonymous callers together
-   and server-wide (``SOS_SMS_*_LIMIT``, see
+   caller, per client address and per IPv6 ``/48`` (all accounts on it together), for
+   anonymous callers together, for new callers together (anonymous callers and accounts
+   younger than ``SOS_SMS_ESTABLISHED_ACCOUNT_HOURS``, so part of the server-wide budget
+   stays reserved for established accounts) and server-wide (``SOS_SMS_*_LIMIT``, see
    :mod:`app.services.sms`), and optionally reserved for signed-in users
    (``SOS_SMS_REQUIRE_AUTH``); refused numbers are listed in ``sms.failed`` and covered by
    ``fallback_sms_uri``. The fan-out has an overall deadline so the response always beats
-   the proxy's 20 s timeout.
+   the proxy's 20 s timeout, and the account-age lookup before it is bounded by
+   :data:`ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS`.
 3. Store an audit row (:class:`~app.db.models.SOSEvent`; counts only, never phone numbers,
    and a keyed hash of the client IP). A database failure or a slow database (bounded by
    :data:`AUDIT_WRITE_TIMEOUT_SECONDS`) is logged but never turns a delivered SOS into an
@@ -23,12 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import CurrentUserDep, OptionalUserDep, SessionDep, SettingsDep, SMSDep
 from app.core.config import Settings
@@ -37,11 +41,12 @@ from app.core.rate_limit import (
     client_ip,
     client_key,
     ip_bucket,
+    ip_prefix_bucket,
     reported_client_ip,
     sos_rate_limit,
 )
-from app.core.security import hash_identifier
-from app.db.models import SOSEvent, new_uuid, utcnow
+from app.core.security import CurrentUser, hash_identifier
+from app.db.models import SOSEvent, User, new_uuid, utcnow
 from app.schemas.common import error_responses
 from app.schemas.sos import (
     MAX_SMS_BODY_CHARS,
@@ -66,6 +71,11 @@ MAX_HISTORY_EVENTS = 50
 #: or below this): a cancelled statement still waits for it. SMS deadline (12 s) + this
 #: + overhead stays inside the proxy's 20 s timeout.
 AUDIT_WRITE_TIMEOUT_SECONDS = 3.0
+#: How long the SOS waits for the caller's account age before the SMS fan-out (seconds).
+#: A slower lookup (locked database) is left to finish in the background and the caller is
+#: treated as a new account, which still gets SMS from the new-caller pool. SMS deadline
+#: (12 s) + this + the audit bound + overhead stays inside the proxy's 20 s timeout.
+ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS = 1.0
 #: ``sms.failed`` error when ``SOS_SMS_REQUIRE_AUTH`` is on and the caller is anonymous.
 SIGN_IN_REQUIRED_ERROR = (
     "Sign in to have ResQ AI text your contacts. Send it from your phone's SMS app instead."
@@ -138,8 +148,83 @@ def sms_address_key(request: Request, signed_in: bool) -> str | None:
     by every user, so only an address it (or a trusted proxy) reported counts. Anonymous
     callers already share their per-client budget with everyone on the same address.
     """
-    address = reported_client_ip(request) if signed_in else client_ip(request)
+    address = _sms_client_address(request, signed_in)
     return f"ip:{ip_bucket(address)}" if address else None
+
+
+def sms_prefix_key(request: Request, signed_in: bool) -> str | None:
+    """IPv6 ``/48`` bucket for the per-prefix SMS budget (``None`` for IPv4 or unknown).
+
+    Same address as :func:`sms_address_key`; IPv4 callers have no wider bucket.
+    """
+    address = _sms_client_address(request, signed_in)
+    prefix = ip_prefix_bucket(address) if address else None
+    return f"net:{prefix}" if prefix else None
+
+
+def _sms_client_address(request: Request, signed_in: bool) -> str | None:
+    return reported_client_ip(request) if signed_in else client_ip(request)
+
+
+#: Account-age lookups that outlived :data:`ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS` (kept
+#: referenced until they finish, so they are not garbage collected mid-flight).
+_pending_lookups: set[asyncio.Task[Any]] = set()
+
+
+def _forget_lookup(task: asyncio.Task[Any]) -> None:
+    _pending_lookups.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Account age lookup failed (%s)", type(task.exception()).__name__)
+
+
+async def _account_created_at(
+    sessionmaker: async_sessionmaker[AsyncSession], user_id: str
+) -> datetime | None:
+    """Registration time of an email/password account, ``None`` when there is no such row.
+
+    Uses its own short session (not the request's), so a lookup left running in the
+    background never shares a connection with the audit write.
+    """
+    async with sessionmaker() as session:
+        return await session.scalar(select(User.created_at).where(User.id == user_id))
+
+
+async def caller_is_established(
+    request: Request, user: CurrentUser | None, settings: Settings
+) -> bool:
+    """``True`` when ``user`` may use the SMS budget reserved for established accounts.
+
+    * anonymous callers: no;
+    * email/password accounts (a ``users`` row): once registered at least
+      ``SOS_SMS_ESTABLISHED_ACCOUNT_HOURS`` ago — such accounts cost nothing to create, so
+      a fresh one must not reach the reserve;
+    * signed-in identities without a row here (OAuth sign-ins: the frontend only mints
+      tokens for those and for registered accounts): yes — the provider vetted the account
+      and this backend never learns its age;
+    * a lookup that fails or takes longer than :data:`ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS`:
+      no (the SOS goes on at once; the caller still gets SMS from the new-caller pool).
+    """
+    if user is None:
+        return False
+    min_age_hours = settings.sos_sms_established_account_hours
+    if min_age_hours <= 0:
+        return True
+    sessionmaker = getattr(request.app.state, "sessionmaker", None)
+    if sessionmaker is None:
+        return False
+    # Waited for with asyncio.wait, not cancelled on timeout: cancelling a statement that
+    # waits for a locked SQLite database still blocks until the busy timeout.
+    lookup = asyncio.ensure_future(_account_created_at(sessionmaker, user.id))
+    _pending_lookups.add(lookup)
+    lookup.add_done_callback(_forget_lookup)
+    done, _ = await asyncio.wait({lookup}, timeout=ACCOUNT_AGE_LOOKUP_TIMEOUT_SECONDS)
+    if lookup not in done or lookup.cancelled() or lookup.exception() is not None:
+        logger.warning("Account age unknown in time; SOS SMS budget as for a new account")
+        return False
+    created_at = lookup.result()
+    if created_at is None:
+        return True
+    return utcnow() - created_at >= timedelta(hours=min_age_hours)
 
 
 def _ip_hash_salt(settings: Settings) -> str:
@@ -219,12 +304,17 @@ async def create_sos(
             failed=[SMSFailed(to=mask_phone(n), error=SIGN_IN_REQUIRED_ERROR) for n in numbers],
         )
     else:
+        signed_in = user is not None
+        # Only looked up when Twilio will be used (it costs a database query).
+        established = sms.configured and await caller_is_established(request, user, settings)
         sms_result = await sms.send_bulk(
             numbers,
             sms_body,
             client_key=client_key(request),
-            address_key=sms_address_key(request, signed_in=user is not None),
-            anonymous=user is None,
+            address_key=sms_address_key(request, signed_in=signed_in),
+            prefix_key=sms_prefix_key(request, signed_in=signed_in),
+            anonymous=not signed_in,
+            established=established,
         )
 
     event = SOSEvent(

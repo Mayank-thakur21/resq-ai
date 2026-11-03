@@ -8,7 +8,7 @@
 ![Node](https://img.shields.io/badge/Node-22-5fa04e?logo=node.js&logoColor=white)
 ![PWA](https://img.shields.io/badge/PWA-installable%20%2B%20offline-5a0fc8)
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ed?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-yellow)
+[![License](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 ResQ AI is a full-stack disaster-response platform. A multi-agent AI assistant gives
 step-by-step safety guidance, and around it sit live disaster alerts, real weather hazards, a
@@ -844,6 +844,7 @@ Nothing below leaves the browser except through explicit API calls:
 
 ## License
 
-MIT © Mayank Thakur. Data © OpenStreetMap contributors (ODbL), GDACS (European Commission JRC
-and UN OCHA), ReliefWeb (UN OCHA), Open-Meteo (CC BY 4.0) and OpenWeatherMap, under their
-respective terms.
+Released under the [MIT License](LICENSE), © 2026 Mayank Thakur.
+
+Data © OpenStreetMap contributors (ODbL), GDACS (European Commission JRC and UN OCHA),
+ReliefWeb (UN OCHA), Open-Meteo (CC BY 4.0) and OpenWeatherMap, under their respective terms.

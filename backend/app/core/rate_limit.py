@@ -122,13 +122,21 @@ class RateLimiter:
     Every method is synchronous: called from the event loop without an ``await`` in between,
     a :meth:`peek` followed by a :meth:`hit` (or several hits on different buckets) is atomic
     with respect to other requests.
+
+    Keys whose windows have run out are dropped by :meth:`prune` (run from :meth:`hit` at
+    most every :attr:`PRUNE_INTERVAL_SECONDS`), so memory follows the clients seen within
+    the longest window, not every client since the process started.
     """
+
+    #: How often :meth:`hit` runs :meth:`prune` (seconds). One pass is a scan of the keys.
+    PRUNE_INTERVAL_SECONDS = 60.0
 
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = enabled
         self._storage = MemoryStorage()
         self._strategy = MovingWindowRateLimiter(self._storage)
         self._parsed: dict[str, list[RateLimitItem]] = {}
+        self._next_prune = time.monotonic() + self.PRUNE_INTERVAL_SECONDS
 
     def _items(self, limit: str) -> list[RateLimitItem]:
         items = self._parsed.get(limit)
@@ -158,6 +166,10 @@ class RateLimiter:
         refusing limit is reported; otherwise every limit is counted and the tightest one is
         reported.
         """
+        now = time.monotonic()
+        if now >= self._next_prune:
+            self._next_prune = now + self.PRUNE_INTERVAL_SECONDS
+            self.prune()
         items = self._items(limit)
         for item in items:
             if not self._strategy.test(item, *identifiers):
@@ -223,6 +235,41 @@ class RateLimiter:
         """Forget the counters of ``limit`` for ``identifiers`` (e.g. after a good login)."""
         for item in self._items(limit):
             self._strategy.clear(item, *identifiers)
+
+    def prune(self) -> int:
+        """Drop the keys whose entries have all expired; returns how many were dropped.
+
+        :class:`~limits.storage.MemoryStorage` trims expired entries but keeps every key it
+        ever saw (with an empty list), and :meth:`refund` can leave a key's lock behind. A
+        client rotating through the ``/64`` networks of its ``/48`` (65,536 subjects) would
+        then leave a few hundred bytes per network in memory for the life of the process,
+        and the storage's expiry thread rescans all of them every few milliseconds.
+
+        Called from :meth:`hit` on the event loop, like every write, so no key gains an
+        entry between the check and the removal; the storage's expiry thread only trims
+        lists, under the same per-key locks used here.
+        """
+        events = getattr(self._storage, "events", None)
+        locks = getattr(self._storage, "locks", None)
+        if not isinstance(events, dict) or locks is None:  # pragma: no cover - limits changed
+            return 0
+        now = time.time()
+
+        def expired(entries: list[object] | None) -> bool:
+            # Newest entry first: when it has expired, the whole window has. An entry without
+            # ``expiry`` (a changed ``limits``) is kept, never dropped too early.
+            return not entries or getattr(entries[0], "expiry", math.inf) <= now
+
+        stale = [key for key, entries in events.items() if expired(entries)]
+        for key in stale:
+            with locks[key]:
+                if expired(events.get(key)):
+                    events.pop(key, None)
+            locks.pop(key, None)
+        for key in list(locks):  # left by refunds of keys that were never hit
+            if key not in events:
+                locks.pop(key, None)
+        return len(stale)
 
     def reset(self) -> None:
         """Forget every counter."""

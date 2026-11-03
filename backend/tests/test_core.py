@@ -712,6 +712,39 @@ class TestRateLimit:
         local.refund("3/minute", "never-hit")  # no-op, never raises
         assert local.count("3/minute", "never-hit") == 0
 
+    def test_prune_forgets_keys_whose_windows_ran_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: ``limits`` kept every key it ever saw, so rotating clients (one per
+        IPv6 ``/64``) grew the process's memory for as long as it ran."""
+        local = RateLimiter()
+        for network in range(50):
+            local.hit("1/second", "client", f"2001:db8:{network:x}::/64")
+        local.hit("5/hour", "live")
+        local.refund("1/minute", "never-hit")  # leaves a lock behind in the storage
+        storage = local._storage
+        assert len(storage.events) == 51
+        assert local.prune() == 0  # nothing has expired yet
+
+        later = time.time() + 2  # entries and prune() both read time.time()
+        monkeypatch.setattr(time, "time", lambda: later)
+        assert local.prune() == 50
+        assert list(storage.events) == ["LIMITER/live/5/1/hour"]
+        assert set(storage.locks) <= set(storage.events)
+        # Counting is unchanged: the live window survives, the pruned ones start afresh.
+        assert local.count("5/hour", "live") == 1
+        assert local.hit("1/second", "client", "2001:db8::/64").allowed
+
+    def test_hit_prunes_periodically(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(RateLimiter, "PRUNE_INTERVAL_SECONDS", 0.0)
+        local = RateLimiter()
+        for network in range(20):
+            local.hit("1/second", "client", str(network))
+        later = time.time() + 2
+        monkeypatch.setattr(time, "time", lambda: later)
+        local.hit("1/second", "client", "new")
+        assert list(local._storage.events) == ["LIMITER/client/new/1/1/second"]
+
     def test_ip_bucket_groups_ipv6_by_64(self) -> None:
         assert ip_bucket("203.0.113.7") == "203.0.113.7"
         assert ip_bucket("2001:db8:1:2::1") == "2001:db8:1:2::/64"

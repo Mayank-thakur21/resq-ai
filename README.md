@@ -275,7 +275,7 @@ Empty values mean "not configured". The matching feature switches off or falls b
 | `SOS_SMS_PER_NUMBER_LIMIT` | `3/hour;10/day` | Twilio SOS SMS per destination number (keyed hash). Numbers over budget are reported in `sms.failed` and covered by `fallback_sms_uri`. |
 | `SOS_SMS_PER_CLIENT_LIMIT` | `30/hour;100/day` | Twilio SOS SMS per caller (signed-in user id, else client address with IPv6 by `/64`), so one caller cannot use up the shared budgets with made-up numbers. |
 | `SOS_SMS_PER_ADDRESS_LIMIT` | `60/hour;200/day` | Twilio SOS SMS per client address (IPv6 by `/64`) for everyone sending from it, signed in or not, so many cheap accounts created on one address share one budget. Signed-in requests count here only when the Next.js server reports the address. People behind one shared address (shelter Wi-Fi, carrier NAT) share it as well. |
-| `SOS_SMS_PER_PREFIX_LIMIT` | `150/hour;600/day` | Twilio SOS SMS per IPv6 `/48` network (all its `/64` addresses together, signed in or not), so one customer rotating through the `/64` networks of its `/48` or `/56` shares one budget. Higher than the per-address budget because a `/48` can also be a carrier pool shared by many people. IPv4 callers have no wider bucket (the per-address budget applies). |
+| `SOS_SMS_PER_PREFIX_LIMIT` | `150/hour;600/day` | Twilio SOS SMS per IPv6 `/48` network (all its `/64` addresses together, signed in or not), so one customer rotating through the `/64` networks of its `/48` or `/56` shares one budget. Higher than the per-address budget because a `/48` can also be a carrier pool shared by many people; one busy client can still use it up for everyone on its `/48`, whose SOS then goes out from the phone's own SMS app (see [Security notes](#security-notes)). IPv4 callers have no wider bucket (the per-address budget applies). |
 | `SOS_SMS_ANONYMOUS_LIMIT` | `200/hour;1000/day` | Twilio SOS SMS for all anonymous callers together (counted inside the global budget), so anonymous traffic can never take more than this part of it. |
 | `SOS_SMS_NEW_CALLER_LIMIT` | `400/hour;2400/day` | Twilio SOS SMS for all new callers together: anonymous callers and email/password accounts younger than `SOS_SMS_ESTABLISHED_ACCOUNT_HOURS`. Counted inside the global budget and kept below it, so the difference (100/hour and 600/day by default) stays reserved for established accounts and freshly registered accounts, however many, cannot use the whole budget. Set it equal to `SOS_SMS_GLOBAL_LIMIT` to drop the reserve. |
 | `SOS_SMS_ESTABLISHED_ACCOUNT_HOURS` | `24` | Account age (hours since registration, 0 to 8760) from which an email/password account may use the reserved part of the global budget. OAuth sign-ins count as established (the provider vetted the account). `0` treats every signed-in caller as established. If the age lookup takes longer than 1 s, the SOS goes on with the caller treated as new. |
@@ -381,7 +381,7 @@ Incident: `{id, created_at, updated_at, lat, lon, disaster_type, severity, descr
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/users/register` | internal | `{email, password (8-128), name (1-80)}` returns **201** `{id, email, name}`, or `409 conflict` if the email is taken. Limit: 5/minute and 20/hour per end client, and 20/minute and 200/hour per IPv6 `/48` (all its `/64` clients together). |
-| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Failed attempts are limited to 5/minute and 20/hour per end client and account, 30/minute per end client and 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a successful sign-in clears that client's counter for the account. When the per-account bucket is full, clients that recently signed in to the account successfully (the last 8 per account, for 14 days; at most 50,000 accounts are remembered, the one with the oldest successful sign-in dropped first) still get in, and clients with fewer than 2 failures of their own may try through a small per-account overflow bucket (20/hour), so someone else's guessing does not lock the owner out, while rotating networks (an IPv6 `/48` holds 65,536 `/64`s) cannot multiply the account's budget. Every attempt, successful or not, also counts against 30/minute and 600/hour per end client and 120/minute and 2,400/hour per IPv6 `/48` (correct passwords cost a bcrypt check too), and successful sign-ins are capped at 30/hour per account (only someone who knows the password can use that up). A client may have at most 4 sign-ins in flight, an IPv6 `/48` at most 16. `503 service_busy` when the bcrypt queue is full; a client's first 3 bcrypt jobs per minute may use 8 slots of it that busier clients cannot take, provided its `/48` has not run more than 6 in that minute. |
+| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Failed attempts are limited to 5/minute and 20/hour per end client and account, 30/minute per end client and 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a successful sign-in clears that client's counter for the account. When the per-account bucket is full, clients that recently signed in to the account successfully (the last 8 per account, for 14 days; at most 50,000 accounts are remembered, the one with the oldest successful sign-in dropped first) still get in, and clients with fewer than 2 failures of their own may try through a small per-account overflow bucket (20/hour), so someone else's guessing does not lock the owner out, while rotating networks (an IPv6 `/48` holds 65,536 `/64`s) cannot multiply the account's budget. Every attempt, successful or not, also counts against 30/minute and 600/hour per end client and 120/minute and 2,400/hour per IPv6 `/48` (correct passwords cost a bcrypt check too; a client that recently signed in to the account is counted there but never refused by it), and successful sign-ins are capped at 30/hour per account (only someone who knows the password can use that up). A client may have at most 4 sign-ins in flight, an IPv6 `/48` at most 16. `503 service_busy` when the bcrypt queue is full; a client's first 3 bcrypt jobs per minute may use 8 slots of it that busier clients cannot take, provided its network (IPv4 `/24`, IPv6 `/40`) has not run more than 6 in that minute. |
 
 The browser cannot reach these through the proxy (`404`). Use the Next.js routes instead:
 `POST /api/register` and the NextAuth credentials sign-in.
@@ -492,7 +492,9 @@ or `http://localhost` for development.
   twice: right away, and again once the sign-out request has deleted the session cookie, so
   nothing fetched with the old session in between (a periodic refresh, another tab) stays
   cached. The app's data refreshes are paused meanwhile, and the signed-out page is a full
-  page load. When a different account signs in without a sign-out in between (e.g. after the
+  page load. Until it has loaded, the old page stops writing per-user data (a chat answer or
+  a new position fix arriving late would otherwise store the transcript or location again
+  for the next page, `lib/user-data.ts`). When a different account signs in without a sign-out in between (e.g. after the
   session expired), the previous account's cached data is cleared the same way
   (`components/SessionDataGuard.tsx`).
 - **Icons** are generated from SVG artwork with `npm run icons`
@@ -734,10 +736,21 @@ Nothing below leaves the browser except through explicit API calls:
   `TRUSTED_PROXY_HOPS` counts them.
 - **IPv6:** per-client limits key IPv6 callers by their `/64` network (one subscriber line or
   host), so rotating addresses inside one's own prefix does not create fresh buckets. Budgets
-  that protect shared resources (sign-in attempts, registrations, the bcrypt reserve and
-  in-flight sign-ins, SOS SMS) also count each IPv6 `/48` as a whole, with higher limits,
-  because one customer often holds a `/48` or `/56` (256 to 65,536 `/64` networks). IPv4
-  callers have no wider bucket.
+  that protect shared resources (sign-in attempts, registrations, in-flight sign-ins, SOS
+  SMS) also count each IPv6 `/48` as a whole, with higher limits, because one customer often
+  holds a `/48` or `/56` (256 to 65,536 `/64` networks). IPv4 callers have no such bucket.
+  The bcrypt reserve's priority budget is counted per IPv4 `/24` and IPv6 `/40` (see
+  **Overload**).
+- **Shared networks (trade-off):** a `/48` can also be a mobile carrier's pool shared by many
+  people, and one client there can use up the `/48` budgets for everyone on it (keeping the
+  sign-in budget full costs it about one request per second). Signing in to an account from
+  a network (`/64`) that signed in to it successfully in the last 14 days is never refused by
+  the `/48` budget, so people keep their accounts on their own devices. Someone signing in
+  from a new network, or signing up, cannot be told apart from that client: they get `429`
+  with `Retry-After` until the `/48` window frees up (up to an hour; OAuth sign-in, anonymous
+  SOS and the chat keep working). Over the `/48` SOS SMS budget the SOS still succeeds and
+  the UI offers the phone's own SMS app. Without these budgets the same client could use up
+  the server-wide budgets for everyone instead, so the damage is kept to its own `/48`.
 - **Bounded memory:** rate-limit state lives in the backend process. Windows that have run
   out are pruned every minute (the `limits` library keeps every key it has seen otherwise),
   and the clients remembered for the sign-in escape hatch are capped at 8 per account and
@@ -759,12 +772,15 @@ Nothing below leaves the browser except through explicit API calls:
   succeeds and the UI offers the phone's own SMS app. For a public deployment with many
   anonymous visitors consider `SOS_SMS_REQUIRE_AUTH=true`.
 - **Overload:** sign-in and registration bcrypt work runs on a bounded queue (`503
-  service_busy` with `Retry-After` when full; part of it is reserved for clients that have
-  not used it in the last minute, every sign-in counts against per-client and per-`/48`
-  rates, and successful sign-ins are capped per account, so a few clients looping a valid
-  password, even from many `/64` networks, cannot keep it full) and never holds a database
-  connection, and an exhausted database pool answers `503 service_busy` after 10 s instead
-  of hanging. The SOS SMS fan-out has a 12 s deadline and the audit write a 3 s bound (with
+  service_busy` with `Retry-After` when full; part of it is reserved for clients, and
+  networks, that have not used it in the last minute, every sign-in counts against
+  per-client and per-`/48` rates, and successful sign-ins are capped per account, so a few
+  clients looping a valid password, or one network rotating its addresses: the 256 of an
+  IPv4 `/24`, the `/64` or `/48` networks of an IPv6 `/40`, cannot keep it full) and never
+  holds a database connection, and an exhausted database pool answers `503 service_busy`
+  after 10 s instead of hanging. The reserve defends against one customer, not a botnet:
+  attackers with addresses in several dozen such networks get a share of the reserve from
+  each and can still keep it full, and first-time sign-ins then get `503` too. The SOS SMS fan-out has a 12 s deadline and the audit write a 3 s bound (with
   SQLite this is the 3 s busy timeout, since a cancelled statement still waits for it), so an
   SOS always answers before the proxy's 20 s timeout. Nearby-places lookups have one 17 s
   budget for the whole Overpass request, including a slowly streamed answer. Database errors

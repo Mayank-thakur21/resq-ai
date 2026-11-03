@@ -68,19 +68,25 @@ There is no mock data. Every integration that needs a key is optional and degrad
 
 | Home | Chat | Relief map |
 |---|---|---|
-| ![Home](docs/images/home.png) | ![Emergency AI chat](docs/images/chat.png) | ![Relief map](docs/images/map.png) |
-
-| Checklist | Contacts | Demo |
-|---|---|---|
-| ![Checklist](docs/images/checklist.png) | ![Contacts](docs/images/contacts.png) | ![Demo](docs/images/demo.gif) |
+| ![Home](docs/screenshots/home.png) | ![Emergency AI chat](docs/screenshots/chat.png) | ![Relief map](docs/screenshots/map.png) |
 
 | Alerts | Incidents | SOS | Mobile |
 |---|---|---|---|
 | ![Disaster alerts](docs/screenshots/alerts.png) | ![Community incidents](docs/screenshots/incidents.png) | ![SOS](docs/screenshots/sos.png) | ![Mobile layout](docs/screenshots/mobile.png) |
 
-The `docs/screenshots/` images were taken from the production build. The GDACS events, news and
-weather shown in them are sample data (the capture environment had no internet access); in a
-real deployment these panels show the live feeds.
+| Checklist | Contacts | Demo (earlier UI) |
+|---|---|---|
+| ![Checklist](docs/screenshots/checklist.png) | ![Contacts](docs/screenshots/contacts.png) | ![Demo of an earlier version](docs/images/demo.webp) |
+
+The `docs/screenshots/` images were taken from the production Docker images (`docker compose`,
+signed in, through the nginx proxy) in an environment without internet access. That is why the
+panels fed by live sources (GDACS alerts and news, weather, OpenStreetMap places and map tiles)
+show the app's "unavailable" / retry states and the map has no background tiles; in a real
+deployment they show the live data. The chat answer is the built-in fallback (no Gemini key), and
+the incidents were reported through the running app. The checklist, contacts and mobile captures
+come from a production build of the same code (`next build` + `next start`); the checklist is the
+built-in flood list and the contacts are sample entries. The animated demo
+(`docs/images/demo.webp`, an animated WebP) was recorded with an earlier version of the UI.
 
 ---
 
@@ -268,8 +274,9 @@ Empty values mean "not configured". The matching feature switches off or falls b
 | `TRUSTED_PROXY_HOPS` | `0` | Reverse proxies directly in front of the **backend** whose `X-Forwarded-For` entry is trusted. `0` ignores the header. Browsers relayed by the Next.js proxy are identified by `X-ResQ-Client-IP` (accepted only together with a valid `X-Internal-Key`), so the standard setup needs `0`. |
 | `SOS_SMS_PER_NUMBER_LIMIT` | `3/hour;10/day` | Twilio SOS SMS per destination number (keyed hash). Numbers over budget are reported in `sms.failed` and covered by `fallback_sms_uri`. |
 | `SOS_SMS_PER_CLIENT_LIMIT` | `30/hour;100/day` | Twilio SOS SMS per caller (signed-in user id, else client address with IPv6 by `/64`), so one caller cannot use up the shared budgets with made-up numbers. |
-| `SOS_SMS_ANONYMOUS_LIMIT` | `200/hour;1000/day` | Twilio SOS SMS for all anonymous callers together (counted inside the global budget), so signed-in users always keep the rest. |
-| `SOS_SMS_GLOBAL_LIMIT` | `500/hour;3000/day` | Twilio SOS SMS for the whole server (caps the Twilio bill whatever callers do). Numbers Twilio rejects are refunded. |
+| `SOS_SMS_PER_ADDRESS_LIMIT` | `60/hour;200/day` | Twilio SOS SMS per client address (IPv6 by `/64`) for everyone sending from it, signed in or not, so many cheap accounts created on one address share one budget. Signed-in requests count here only when the Next.js server reports the address. People behind one shared address (shelter Wi-Fi, carrier NAT) share it as well. |
+| `SOS_SMS_ANONYMOUS_LIMIT` | `200/hour;1000/day` | Twilio SOS SMS for all anonymous callers together (counted inside the global budget), so anonymous traffic can never take more than this part of it. |
+| `SOS_SMS_GLOBAL_LIMIT` | `500/hour;3000/day` | Twilio SOS SMS for the whole server (caps the Twilio bill whatever callers do). Numbers Twilio rejects are refunded. Callers spread over many addresses can still use it up; contacts over budget get the native-SMS fallback. |
 | `SOS_SMS_REQUIRE_AUTH` | `false` | `true` sends Twilio SMS only for signed-in users; anonymous callers get the native-SMS fallback. |
 | `ALERT_POLLER_ENABLED` | `false` | Start the background GDACS poller that pushes Orange/Red alerts (needs VAPID keys). The example env files and Compose turn it on. When off, `/api/push/vapid-public-key` reports `disaster_alerts: false` and the app hides that topic. |
 | `ALERT_POLL_INTERVAL_SECONDS` | `600` | Poll interval (30 to 86400). |
@@ -329,7 +336,7 @@ below sits under `/api` on the backend. From the browser, call it through the pr
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/places?lat&lon&type=hospital&radius=5000&limit=100` | none | `{places[{id, name, type, lat, lon, distance_km, address, phone}]}`, nearest first. `type` is `hospital`, `shelter`, `police`, `fire_station` or `pharmacy`. The radius is clamped to 500-20000 m. One Overpass query per map view (a ~1.1 km cell and a radius tier of 1/2/5/10/20 km) returns every place type and is cached for `PLACES_CACHE_TTL`, so all layers, nearby users and any radius up to the tier share it; distances are measured from the exact point. Returns `502 upstream_error` if Overpass fails (never an empty list). |
+| GET | `/api/places?lat&lon&type=hospital&radius=5000&limit=100` | none | `{places[{id, name, type, lat, lon, distance_km, address, phone}]}`, nearest first. `type` is `hospital`, `shelter`, `police`, `fire_station` or `pharmacy`. The radius is clamped to 500-20000 m. One Overpass query per map view (a ~1.1 km cell and a radius tier of 1/2/5/10/20 km) returns every place type and is cached for `PLACES_CACHE_TTL`, so all layers, nearby users and any radius up to the tier share it; distances are measured from the exact point. Returns `502 upstream_error` if Overpass fails (never an empty list), also for a type Overpass did not get to before running out of time (a partial answer serves only the types it searched completely). |
 | GET | `/api/hospitals`, `/api/shelters`, `/api/police`, `/api/fire-stations` (`?lat&lon`) | none | Legacy shortcuts with the same item shape: `{"hospitals": [...]}`, `{"shelters": [...]}`, `{"police": [...]}`, `{"fire_stations": [...]}`. |
 
 ### SOS
@@ -371,7 +378,7 @@ Incident: `{id, created_at, updated_at, lat, lon, disaster_type, severity, descr
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/users/register` | internal | `{email, password (8-128), name (1-80)}` returns **201** `{id, email, name}`, or `409 conflict` if the email is taken. Limit: 5/minute and 20/hour per end client. |
-| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Only **failed** attempts count: 5/minute and 20/hour per end client and account, 30/minute per end client, 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a client may have at most 4 sign-ins in flight. A successful sign-in clears that client's counter for the account. When the per-account bucket is full, it only refuses clients that already have 2 failures of their own against the account, so a burst of someone else's guessing does not lock the owner out. `503 service_busy` when the bcrypt queue is full. |
+| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Failed attempts are limited to 5/minute and 20/hour per end client and account, 30/minute per end client and 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a successful sign-in clears that client's counter for the account. When the per-account bucket is full, clients that signed in to the account before (remembered for 30 days) still get in, and clients with fewer than 2 failures of their own may try through a small per-account overflow bucket (20/hour), so someone else's guessing does not lock the owner out, while rotating networks (an IPv6 `/48` holds 65,536 `/64`s) cannot multiply the account's budget. Every attempt, successful or not, also counts against 30/minute and 600/hour per end client (correct passwords cost a bcrypt check too), and a client may have at most 4 sign-ins in flight. `503 service_busy` when the bcrypt queue is full; a client's first 3 bcrypt jobs per minute may use 8 slots of it that busier clients cannot take. |
 
 The browser cannot reach these through the proxy (`404`). Use the Next.js routes instead:
 `POST /api/register` and the NextAuth credentials sign-in.
@@ -474,8 +481,13 @@ or `http://localhost` for development.
   server-error` when they replace a `5xx`). Uncached API requests while offline get a `503`
   JSON error with code `network_error`. Navigations answered `5xx` fall back to the saved page,
   and for `502`-`504` without one to the offline page.
-- **Sign-out** clears the service worker's API cache and the tab's chat transcript and incident
-  draft, and unlinks this device's push subscription from the account (`lib/sign-out.ts`).
+- **Sign-out** clears the service worker's API cache (from the page itself, so it also works
+  after a hard reload, and responses still in flight are not stored afterwards), the tab's
+  chat transcript and incident draft, the last location and the remembered SOS name, and
+  unlinks this device's push subscription from the account (`lib/sign-out.ts`). When a
+  different account signs in without a sign-out in between (e.g. after the session expired),
+  the previous account's cached data is cleared the same way
+  (`components/SessionDataGuard.tsx`).
   Signing in re-links it, so test notifications reach the device that shows "On".
 - **Icons** are generated from SVG artwork with `npm run icons`
   (`frontend/scripts/generate-icons.mjs`, uses the `sharp` that ships with Next.js). The script
@@ -631,7 +643,8 @@ Nothing below leaves the browser except through explicit API calls:
 | Storage | Key | Contents |
 |---|---|---|
 | localStorage | `resq_contacts` | Emergency contacts (shared by `/contacts`, `/sos` and `/offline`). |
-| localStorage | `resq_sos_name` | Name used in SOS messages. |
+| localStorage | `resq_sos_name` | Name used in SOS messages, with a tag of the account it was used under: it is only offered to that account (or to anonymous use if it was typed signed out) and cleared on sign-out. |
+| localStorage | `resq_data_owner` | Short tag (a hash, not the id) of the last account signed in on this device; when another account signs in, the previous one's cached data is cleared. |
 | localStorage | `resq_checklist` | Last checklist and which items are ticked. |
 | localStorage | `resq_map_prefs` | Map layers and radius. |
 | localStorage | `resq_dismissed_alerts` | Dismissed home alert banners (kept 14 days). |
@@ -695,7 +708,11 @@ Nothing below leaves the browser except through explicit API calls:
   part was wrong.
 - **Privacy:** phone numbers are masked in logs (`+91******3210`) and API responses. Tokens are
   never logged. SOS audit rows store counts and a keyed hash of the client IP. Emergency
-  contacts never leave the device except when you send an SOS.
+  contacts never leave the device except when you send an SOS. Request logs never contain
+  query strings, which carry users' coordinates: the backend logs only method, path, status
+  and duration (`app.access`; uvicorn's own access log is off), and the nginx proxy logs
+  `$uri` without the query (`deploy/nginx/default.conf`, whose error log is kept at `crit`
+  because nginx's error lines quote the full request).
 - **Abuse protection:** every feature route is rate limited (SOS more strictly). Request bodies
   through the proxy must be JSON and at most 1 MB. Validation errors return `422` without
   internals. Unexpected errors return a generic `500` with a request id.
@@ -712,19 +729,26 @@ Nothing below leaves the browser except through explicit API calls:
 - **IPv6:** per-client limits key IPv6 callers by their `/64` network (one subscriber line or
   host), so rotating addresses inside one's own prefix does not create fresh buckets.
 - **SMS abuse:** besides the per-client `SOS_RATE_LIMIT`, Twilio messages have budgets per
-  destination number, per caller (`SOS_SMS_PER_CLIENT_LIMIT`: user id, else address), for all
-  anonymous callers together (`SOS_SMS_ANONYMOUS_LIMIT`, a part of the global budget) and per
-  server (`SOS_SMS_GLOBAL_LIMIT`). Numbers Twilio rejects (free) are refunded to the shared
-  budgets. One caller therefore cannot flood a phone or use up the server's SMS budget, and
-  anonymous traffic can never use up what signed-in users need. Over budget, the SOS still
+  destination number, per caller (`SOS_SMS_PER_CLIENT_LIMIT`: user id, else address), per
+  client address for all its users together (`SOS_SMS_PER_ADDRESS_LIMIT`, so a pile of
+  accounts registered from one address shares one budget), for all anonymous callers together
+  (`SOS_SMS_ANONYMOUS_LIMIT`, a part of the global budget) and per server
+  (`SOS_SMS_GLOBAL_LIMIT`). Numbers Twilio rejects (free) are refunded to the shared budgets.
+  One caller or one address therefore cannot flood a phone or use up the server's SMS budget,
+  and anonymous traffic can never take more than its pool. The global budget is a bill cap:
+  an attacker spread over many addresses can still use it up. Over budget, the SOS still
   succeeds and the UI offers the phone's own SMS app. For a public deployment with many
   anonymous visitors consider `SOS_SMS_REQUIRE_AUTH=true`.
 - **Overload:** sign-in and registration bcrypt work runs on a bounded queue (`503
-  service_busy` with `Retry-After` when full) and never holds a database connection, and an
-  exhausted database pool answers `503 service_busy` after 10 s instead of hanging. The SOS
-  SMS fan-out has a 12 s deadline and the audit write a 3 s bound, so an SOS always answers
-  before the proxy's 20 s timeout. Database errors never log row values
-  (`hide_parameters`).
+  service_busy` with `Retry-After` when full; part of it is reserved for clients that have
+  not used it in the last minute, and every sign-in counts against a per-client rate, so a
+  few clients looping a valid password cannot keep it full) and never holds a database
+  connection, and an exhausted database pool answers `503 service_busy` after 10 s instead
+  of hanging. The SOS SMS fan-out has a 12 s deadline and the audit write a 3 s bound (with
+  SQLite this is the 3 s busy timeout, since a cancelled statement still waits for it), so an
+  SOS always answers before the proxy's 20 s timeout. Nearby-places lookups have one 17 s
+  budget for the whole Overpass request, including a slowly streamed answer. Database errors
+  never log row values (`hide_parameters`).
 - **Web push endpoints** are allow-listed to browser push services and deliveries never follow
   redirects, so a subscription cannot make the server call internal addresses (SSRF).
   Subscriptions that fail 5 times in a row are deleted.

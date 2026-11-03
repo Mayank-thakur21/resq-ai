@@ -246,9 +246,11 @@ export default function ChatView() {
 
   const hasUserMessages = messages.some((message) => message.role === "user");
 
+  // Exactly fills the viewport between the navbar and the mobile tab bar (composer always
+  // visible), minus the offline banner while it is shown (`OFFLINE_BANNER_HEIGHT_VAR`).
   return (
     <MotionConfig reducedMotion="user">
-      <div className="mx-auto flex h-[calc(100dvh-7.5rem-env(safe-area-inset-bottom))] w-full max-w-5xl flex-col bg-slate-900/50 lg:h-[calc(100dvh-4rem)]">
+      <div className="mx-auto flex h-[calc(100dvh-7.5rem-env(safe-area-inset-bottom)-var(--offline-banner-h))] w-full max-w-5xl flex-col bg-slate-900/50 lg:h-[calc(100dvh-4rem-var(--offline-banner-h))]">
         <header className="flex items-center justify-between gap-3 border-b border-slate-800 bg-slate-950/80 px-4 py-3 backdrop-blur-md sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <span aria-hidden="true" className="hidden rounded-lg bg-red-500/10 p-2 text-red-500 sm:inline-flex">

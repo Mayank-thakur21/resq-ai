@@ -20,7 +20,8 @@ import { cn } from "@/lib/utils";
  * 3. Shows a short "Back online" note from the browser's online/offline events. The
  *    "You're offline" banner itself is {@link OfflineBanner}, rendered by the layout right
  *    under the navbar *in the page flow*, so it pushes the page down instead of covering
- *    its first lines (as a fixed overlay did).
+ *    its first lines (as a fixed overlay did). Its height is published as
+ *    {@link OFFLINE_BANNER_HEIGHT_VAR} for the views sized to the viewport.
  *
  * Everything is best-effort: registration failures are logged, never shown as errors.
  */
@@ -197,16 +198,55 @@ function useServiceWorker(): { waiting: ServiceWorker | null; applyUpdate: () =>
 }
 
 /**
+ * CSS custom property on `<html>` holding the offline banner's height while it is shown
+ * (`app/globals.css` defaults it to 0px). Views sized to the viewport rather than to their
+ * content, i.e. `/chat` and `/map` (`100dvh` minus the navbar and the mobile tab bar),
+ * subtract it too; otherwise the banner pushes their bottom (chat composer, map controls)
+ * under the fixed tab bar.
+ */
+export const OFFLINE_BANNER_HEIGHT_VAR = "--offline-banner-h";
+
+/**
+ * Keeps {@link OFFLINE_BANNER_HEIGHT_VAR} equal to the height of `banner` (it changes when the
+ * text wraps differently, e.g. on rotation) and removes it when the banner goes away.
+ * Client-only, after hydration: the server and the first render show no banner, so the
+ * property never exists in the server HTML and cannot cause a hydration mismatch.
+ */
+function usePublishedHeight(banner: React.RefObject<HTMLElement | null>, shown: boolean): void {
+  // Layout effect: applied before the browser paints the banner, so the views never show
+  // a frame with their bottom under the tab bar.
+  React.useLayoutEffect(() => {
+    const element = banner.current;
+    if (!shown || !element) return;
+    const root = document.documentElement;
+    const publish = () => {
+      // Rounded up: a fractional height must not leave the views a fraction of a pixel too tall.
+      root.style.setProperty(OFFLINE_BANNER_HEIGHT_VAR, `${Math.ceil(element.getBoundingClientRect().height)}px`);
+    };
+    publish();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(publish);
+    observer?.observe(element);
+    return () => {
+      observer?.disconnect();
+      root.style.removeProperty(OFFLINE_BANNER_HEIGHT_VAR);
+    };
+  }, [banner, shown]);
+}
+
+/**
  * "You're offline" banner. Rendered by the root layout between the navbar and `<main>`:
  * sticky under the navbar but part of the page flow, so while it is shown the page starts
- * below it instead of under it.
+ * below it instead of under it. Its height is published as {@link OFFLINE_BANNER_HEIGHT_VAR}.
  */
 export function OfflineBanner() {
   const { online } = useOnlineStatus();
+  const bannerRef = React.useRef<HTMLDivElement>(null);
+  usePublishedHeight(bannerRef, !online);
   if (online) return null;
 
   return (
     <div
+      ref={bannerRef}
       data-slot="offline-banner"
       className="sticky top-14 z-30 flex justify-center px-3 pt-2 lg:top-16 print:hidden"
     >

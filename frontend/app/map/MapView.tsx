@@ -143,8 +143,11 @@ export default function MapView({ initialCenter }: MapViewProps) {
     recenterLabel: geo.coords ? "Recenter on my location" : "Find my location",
   };
 
+  // Exactly fills the viewport between the navbar (and its 1px border) and the mobile tab
+  // bar, minus the offline banner while it is shown (`OFFLINE_BANNER_HEIGHT_VAR`), so the
+  // map's bottom controls and attribution stay visible.
   return (
-    <div className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom))] min-h-[30rem] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px)]">
+    <div className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom)-var(--offline-banner-h))] min-h-[30rem] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px-var(--offline-banner-h))]">
       <header className="relative z-10 flex flex-col gap-3 border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between lg:px-6">
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-lg font-bold text-white sm:text-xl">

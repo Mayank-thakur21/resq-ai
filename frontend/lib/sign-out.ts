@@ -7,7 +7,8 @@
  *   ({@link API_CACHE_NAME}) is deleted from the page itself (CacheStorage is shared with the
  *   worker, so this also works when no worker controls the page, e.g. after a hard reload),
  *   and the active worker is told with a `CLEAR_API_CACHE` message, so responses still in
- *   flight are not written back into the cache afterwards (`public/sw.js`).
+ *   flight are not written back into the cache afterwards (`public/sw.js`). Signing out does
+ *   this twice, before and after the session cookie is deleted ({@link signOutAndForget}).
  * - The chat transcript lives in sessionStorage for the tab (`CHAT_HISTORY_STORAGE_KEY`).
  * - An unsent incident report draft (sessionStorage, `INCIDENT_DRAFT_KEY` in
  *   `components/IncidentForm.tsx`) is the signed-in user's own text.
@@ -97,13 +98,86 @@ export async function forgetUserData(): Promise<void> {
   }
 }
 
+/** True while {@link signOutAndForget} runs; see there. */
+let signingOut = false;
+
 /**
- * Forgets cached per-user data, unlinks this device's push subscription from the account
- * (best effort, a few seconds at most), then signs out via NextAuth (redirects to
- * `callbackUrl`).
+ * Whether a sign-out is under way. `components/Providers.tsx` passes this to SWR as
+ * `isPaused`, so no hook starts a request (e.g. the 60 s incidents refresh) with the session
+ * that is about to end.
+ */
+export function isSigningOut(): boolean {
+  return signingOut;
+}
+
+/**
+ * Same-origin path to load after signing out; anything else (another origin, malformed)
+ * becomes "/". The callers pass app paths; this only guards against a future misuse turning
+ * sign-out into an open redirect.
+ */
+function signedOutDestination(callbackUrl: string): string {
+  try {
+    const target = new URL(callbackUrl, window.location.origin);
+    if (target.origin === window.location.origin) return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    // Malformed: fall through to the home page.
+  }
+  return "/";
+}
+
+/**
+ * Signs out and forgets this device's per-user data, in an order that leaves nothing
+ * fetched with the ending session in the service worker's cache:
+ *
+ * 1. SWR revalidation is paused ({@link isSigningOut}), so the app's own refreshes do not
+ *    start requests with the old session while this runs (unlinking and the sign-out request
+ *    can take seconds on a slow network).
+ * 2. {@link forgetUserData} right away, so the data is gone even if the sign-out request
+ *    hangs or fails (offline).
+ * 3. This device's push subscription is unlinked from the account (best effort, a few
+ *    seconds at most; it needs the session, so it runs before 4).
+ * 4. NextAuth's sign-out request (`redirect: false`), whose response deletes the session
+ *    cookie.
+ * 5. {@link forgetUserData} again, now that the cookie is gone. Requests that still carried
+ *    the old session in the meantime (a refresh that started before 1, another tab, a fetch
+ *    outside SWR) were either stored already, and are deleted now, or are still in flight
+ *    under the cache generation that this `CLEAR_API_CACHE` retires, so the worker drops them
+ *    when they land (`public/sw.js`). Every request the worker handles from here on is
+ *    anonymous. This step runs even when 4 fails: whether the cookie survived is unknown.
+ * 6. A full page load of `callbackUrl` (not a client-side transition) discards everything
+ *    still held in memory: SWR's cache, React state, the paused flag. Should the browser
+ *    later restore this page from its back/forward cache, it is reloaded instead of showing
+ *    the previous account's data (with SWR still paused).
+ *
+ * Clearing only *before* the sign-out request (the previous order) left a window of seconds
+ * in which a refresh, still authenticated, was cached under the new generation. Making the
+ * worker refuse to cache until the next navigation was considered instead, but the worker
+ * keeps that state in memory, which the browser discards whenever the idle worker is
+ * stopped, and it would also stop caching after an account switch without a page load
+ * (`components/SessionDataGuard.tsx`); clearing after the cookie is gone needs neither.
+ *
+ * Rejects (with the data already forgotten and SWR running again) when the sign-out request
+ * fails, so the caller can tell the user.
  */
 export async function signOutAndForget(callbackUrl = "/"): Promise<void> {
-  await forgetUserData();
-  await unlinkCurrentSubscription();
-  await signOut({ callbackUrl });
+  signingOut = true;
+  let signedOut = false;
+  try {
+    await forgetUserData();
+    await unlinkCurrentSubscription();
+    await signOut({ callbackUrl, redirect: false });
+    signedOut = true;
+  } finally {
+    // forgetUserData never rejects, so the sign-out error (if any) is what propagates.
+    await forgetUserData();
+    // Failed: still signed in as far as we know, so the app may refresh again.
+    if (!signedOut) signingOut = false;
+  }
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) window.location.reload();
+  });
+  const destination = signedOutDestination(callbackUrl);
+  window.location.assign(destination);
+  // Same as NextAuth's own redirect: a "#..." target would only change the fragment.
+  if (destination.includes("#")) window.location.reload();
 }

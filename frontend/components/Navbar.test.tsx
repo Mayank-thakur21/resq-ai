@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -68,9 +68,13 @@ describe("Navbar", () => {
       value: { controller: { postMessage } },
     });
     window.sessionStorage.setItem("resq_chat_history", "[]");
+    // jsdom cannot load another page; the sign-out ends with a full page load of "/".
+    const assign = vi.fn();
+    vi.stubGlobal("location", { origin: window.location.origin, href: window.location.href, assign, reload: vi.fn() });
     try {
       await user.click(screen.getByRole("button", { name: "Sign out" }));
-      expect(auth.signOut).toHaveBeenCalledWith({ callbackUrl: "/" });
+      expect(auth.signOut).toHaveBeenCalledWith({ callbackUrl: "/", redirect: false });
+      await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
       expect(postMessage).toHaveBeenCalledWith({ type: "CLEAR_API_CACHE" });
       expect(window.sessionStorage.getItem("resq_chat_history")).toBeNull();
     } finally {

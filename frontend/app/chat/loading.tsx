@@ -3,7 +3,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 /** Route-level skeleton for `/chat` (header, a few bubbles, composer). */
 export default function ChatLoading() {
   return (
-    <div className="mx-auto flex h-[calc(100dvh-7.5rem-env(safe-area-inset-bottom))] w-full max-w-5xl flex-col bg-slate-900/50 lg:h-[calc(100dvh-4rem)]">
+    <div className="mx-auto flex h-[calc(100dvh-7.5rem-env(safe-area-inset-bottom)-var(--offline-banner-h))] w-full max-w-5xl flex-col bg-slate-900/50 lg:h-[calc(100dvh-4rem-var(--offline-banner-h))]">
       <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3 sm:px-6">
         <div className="flex items-center gap-3">
           <Skeleton className="size-10 rounded-lg" />

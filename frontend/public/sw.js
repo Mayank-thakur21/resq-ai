@@ -37,7 +37,9 @@
  * Messages: {type: "SKIP_WAITING"} activates a waiting update (sent by the "Reload" toast);
  * {type: "CLEAR_API_CACHE"} drops cached API data (e.g. on sign-out). It also bumps an API
  * cache generation: a response that was still in flight (fetched with the previous user's
- * session) is not written into the cache once it arrives.
+ * session) is not written into the cache once it arrives. Sign-out sends it again once the
+ * session cookie is gone (lib/sign-out.ts), so every request handled after that second
+ * message is anonymous and every earlier one is dropped or deleted.
  *
  * Push: shows the backend's payload {title, body, url, tag, severity}; clicking focuses an
  * open ResQ AI window (navigating it to the url) or opens a new one.

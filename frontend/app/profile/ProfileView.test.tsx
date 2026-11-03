@@ -141,10 +141,14 @@ describe("ProfileView", () => {
   it("signs out and forgets the chat transcript", async () => {
     window.sessionStorage.setItem(CHAT_HISTORY_STORAGE_KEY, "[]");
     auth.signOut.mockResolvedValue(undefined);
+    // jsdom cannot load another page; the sign-out ends with a full page load of "/".
+    const assign = vi.fn();
+    vi.stubGlobal("location", { origin: window.location.origin, href: window.location.href, assign, reload: vi.fn() });
     const user = userEvent.setup();
     renderProfile();
     await user.click(screen.getByRole("button", { name: "Sign out" }));
-    await waitFor(() => expect(auth.signOut).toHaveBeenCalledWith({ callbackUrl: "/" }));
+    await waitFor(() => expect(auth.signOut).toHaveBeenCalledWith({ callbackUrl: "/", redirect: false }));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
     expect(window.sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY)).toBeNull();
   });
 });

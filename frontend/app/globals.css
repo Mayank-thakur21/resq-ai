@@ -49,6 +49,9 @@
 }
 
 :root {
+  /* Height of the "You're offline" banner while it is shown; set on <html> by OfflineBanner
+     (components/PwaRegister.tsx). The views sized to the viewport (/chat, /map) subtract it. */
+  --offline-banner-h: 0px;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -126,5 +129,12 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* The offline banner is not printed (print:hidden), so it takes no space on paper either. */
+@media print {
+  :root {
+    --offline-banner-h: 0px !important;
   }
 }

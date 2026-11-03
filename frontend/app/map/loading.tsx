@@ -6,7 +6,7 @@ export default function MapLoading() {
     <div
       role="status"
       aria-live="polite"
-      className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom))] min-h-[30rem] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px)]"
+      className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom)-var(--offline-banner-h))] min-h-[30rem] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px-var(--offline-banner-h))]"
     >
       <span className="sr-only">Loading the relief map…</span>
       <div className="flex items-center justify-between gap-3 border-b border-white/10 bg-slate-900 px-4 py-3 lg:px-6">

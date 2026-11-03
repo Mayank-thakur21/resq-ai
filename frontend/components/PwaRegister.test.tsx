@@ -1,7 +1,15 @@
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import PwaRegister, { isServiceWorkerEnabled, OfflineBanner, SERVICE_WORKER_URL } from "@/components/PwaRegister";
+import PwaRegister, {
+  isServiceWorkerEnabled,
+  OFFLINE_BANNER_HEIGHT_VAR,
+  OfflineBanner,
+  SERVICE_WORKER_URL,
+} from "@/components/PwaRegister";
 
 class FakeWorker extends EventTarget {
   state = "installed";
@@ -99,6 +107,97 @@ describe("PwaRegister — connectivity", () => {
     expect(banner?.className.split(/\s+/)).not.toContain("fixed");
     // The fixed status area (update / back online toasts) has nothing to show.
     expect(container.querySelector('[data-slot="pwa-status"]')).toBeNull();
+  });
+});
+
+describe("OfflineBanner — room for views sized to the viewport (review round 4)", () => {
+  const root = () => document.documentElement.style;
+  let bannerHeight = 0;
+  let resize: (() => void) | undefined;
+
+  beforeEach(() => {
+    bannerHeight = 0;
+    resize = undefined;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ height: bannerHeight }) as DOMRect,
+    );
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          resize = callback;
+        }
+        observe() {}
+        disconnect() {
+          resize = undefined;
+        }
+      },
+    );
+  });
+
+  afterEach(() => {
+    root().removeProperty(OFFLINE_BANNER_HEIGHT_VAR);
+  });
+
+  it("publishes the banner's height on <html> while offline and removes it when back online", () => {
+    // Regression: /chat and /map size themselves to the viewport minus the navbar and tab
+    // bar, so the in-flow banner pushed the chat composer and the map's attribution under
+    // the mobile tab bar (input bottom 815 px vs tab bar top 779 px at 390x844).
+    render(<OfflineBanner />);
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("");
+
+    bannerHeight = 89.5;
+    act(() => {
+      setOnline(false);
+      window.dispatchEvent(new Event("offline"));
+    });
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("90px");
+
+    // The text wraps onto another line (narrower viewport, rotation).
+    bannerHeight = 112;
+    act(() => resize?.());
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("112px");
+
+    act(() => {
+      setOnline(true);
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("");
+    expect(resize).toBeUndefined();
+  });
+
+  it("works without ResizeObserver", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    bannerHeight = 70;
+    setOnline(false);
+    const { unmount } = render(<OfflineBanner />);
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("70px");
+    unmount();
+    expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("");
+  });
+
+  it("is subtracted by every view sized to the viewport, and defaults to 0px", () => {
+    // jsdom's import.meta.url is not a file: URL; vitest runs from the frontend root.
+    const sources = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) return sources(full);
+        return /\.tsx$/.test(entry.name) && !/\.test\.tsx$/.test(entry.name) ? [full] : [];
+      });
+    // Fixed heights (`h-[calc(100dvh…)]`, any breakpoint), not `min-h-…` (content can grow).
+    const fixedHeight = /(?<![\w-])(?:\w+:)*h-\[calc\(100dvh[^\s"'`]*\]/g;
+    const found: string[] = [];
+    for (const file of [...sources(path.join(process.cwd(), "app")), ...sources(path.join(process.cwd(), "components"))]) {
+      for (const [match] of readFileSync(file, "utf8").matchAll(fixedHeight)) {
+        found.push(`${path.relative(process.cwd(), file)}: ${match}`);
+      }
+    }
+    // /chat and /map, each with its route skeleton, on mobile and on desktop.
+    expect(found.length).toBeGreaterThanOrEqual(8);
+    expect(found.filter((entry) => !entry.includes(`var(${OFFLINE_BANNER_HEIGHT_VAR})`))).toEqual([]);
+
+    const css = readFileSync(path.join(process.cwd(), "app", "globals.css"), "utf8");
+    expect(css).toMatch(new RegExp(`:root \\{[^}]*${OFFLINE_BANNER_HEIGHT_VAR}: 0px;`));
   });
 });
 

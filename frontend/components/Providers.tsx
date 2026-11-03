@@ -7,6 +7,7 @@ import { SWRConfig, type SWRConfiguration } from "swr";
 
 import { SessionDataGuard } from "@/components/SessionDataGuard";
 import { compareApiData, fetcher, isApiError } from "@/lib/api";
+import { isSigningOut } from "@/lib/sign-out";
 
 /**
  * Retry policy: never retry client errors (4xx — retrying cannot fix a bad request, missing
@@ -39,6 +40,9 @@ export const swrConfig: SWRConfiguration = {
   // A saved (offline) copy must be replaced by live data even when the content is identical,
   // so the "Showing saved data" notice disappears once the connection is back.
   compare: compareApiData,
+  // No revalidation (periodic refresh, focus, reconnect, newly mounted keys) while signing
+  // out: it would still carry the session that is ending (see `signOutAndForget`).
+  isPaused: isSigningOut,
 };
 
 export interface ProvidersProps {

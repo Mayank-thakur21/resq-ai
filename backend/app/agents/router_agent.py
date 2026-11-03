@@ -220,6 +220,17 @@ _PERSON = (
     r"someone|somebody|everyone|people)"
     rf"|\b(?:my|our|his|her|their|a|an|the|this|that) {_RELATIVE}|\b{_RELATIVE})"
 )
+#: What follows "fell" in idioms, where a person falling is not hurt: "fell asleep", "fell
+#: in love", "fell behind", "fell for the prank", "fell silent", "fell short". "Fell ill" and
+#: "fell sick" stay medical; "fell into the well" or "fell through the ice" is a real fall.
+_FELL_IDIOM = (
+    r"(?!\s+(?:asleep|in love|head over heels|out of (?:love|favou?r|touch|step|line)|behind|"
+    r"apart|silent|quiet|short|pregnant|victim|prey|in line|in step|into line|into place|"
+    r"in with|out with|off the wagon|back (?:on|to|into)|"
+    r"for (?:it|him|her|them|me|us|you|the|that|this|a|an|his|my|our|their|your|every|each)|"
+    r"into (?:a |an |the )?(?:deep |long )?(?:sleep|slumber|trap|habit|routine|rut|debt|"
+    r"depression|despair|conversation|silence)|under (?:the|his|her|their) spell)\b)"
+)
 #: Water (or a river, the sea) as the subject of a sentence: "rain water", "rainwater",
 #: "flood waters", "the river".
 _WATER = (
@@ -233,6 +244,21 @@ _AUX = (
     r"began|begun|begins|continues|continued|still|now|already|just|slowly|quickly|rapidly|"
     r"fast|suddenly|steadily|on|to|also)){0,4}"
 )
+#: Not followed by a thing that water gets into, over or through without anyone being in
+#: danger ("water got into my phone", "spilled over my laptop", "flowing through the new
+#: pipes", "flowing into the tank"): devices, containers, plumbing, clothes, ears. Up to three
+#: words may come first ("my son's new phone"). Places ("the house", "the street") still count.
+_NOT_INTO_A_THING = (
+    r"(?!\s+(?:(?:my|our|your|his|her|their|the|a|an|this|that|its|some|new|old|\w+'s)\s+){0,3}"
+    r"(?:(?:mobile |cell |smart ?)?phones?|mobiles?|laptops?|keyboards?|computers?|pcs?|"
+    r"tablets?|ipads?|tvs?|televisions?|screens?|chargers?|sockets?|plugs?|cameras?|"
+    r"watch(?:es)?|earphones|headphones|earbuds|bags?|backpacks?|purses?|wallets?|shoes?|"
+    r"boots?|socks?|clothes|glass(?:es)?|cups?|mugs?|bottles?|jugs?|buckets?|(?:fish ?)?tanks?|"
+    r"pots?|pans?|kettles?|bowls?|vases?|pipes?|pipelines?|taps?|faucets?|sinks?|"
+    r"(?:bath)?tubs?|toilets?|drains?|gutters?|sewers?|filters?|purifiers?|coolers?|"
+    r"fridges?|(?:washing )?machines?|dishwashers?|engines?|ears?|eyes?|nose|mouth|"
+    r"(?:swimming )?pools?|aquariums?)\b)"
+)
 #: Water moving in or rising, any tense: "entered", "is coming in", "keeps rising", "rose",
 #: "has reached", "seeping into", "flowing into", "got inside", "surrounded".
 _WATER_MOVES = (
@@ -241,6 +267,7 @@ _WATER_MOVES = (
     r"(?:com(?:e|es|ing)|came|get(?:s|ting)?|got|pour(?:s|ed|ing)?|rush(?:es|ed|ing)?|"
     r"gush(?:es|ed|ing)?|leak(?:s|ed|ing)?|spill(?:s|ed|ing)?)\s+(?:in|into|inside|through|over)|"
     r"flow(?:s|ed|ing)?\s+(?:in|into|inside|through|over|onto|across|along|down))\b"
+    rf"{_NOT_INTO_A_THING}"
 )
 #: The flood is happening to the writer now (also used as "ongoing", see :func:`_ongoing`).
 _FLOOD_SITUATION = (
@@ -278,7 +305,8 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("landslide", r"\b(landslide|mudslide|landslip|rockfall)s?\b"),
         (
             "flood",
-            r"\bflood\w*|\binundat\w*|\bwaterlogg\w*|\bwater (is |was )?inside\b"
+            r"\bflood\w*|\binundat\w*|\bwaterlogg\w*"
+            rf"|\bwater (?:is |was )?inside\b{_NOT_INTO_A_THING}"
             r"|\boverflow\w*|\bburst (its|their) banks?\b|\bdam (broke|burst|breach\w*|failed)\b"
             rf"|\bheavy rain\w*|\bcloud ?burst\b|{_FLOOD_SITUATION}",
         ),
@@ -311,11 +339,15 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             r"\b(injur\w*|bleed\w*|unconscious|heart attack|not breathing|can'?t breathe|"
             r"chest pain|ambulance|faint\w*|seizure|stroke|overdose|poison\w*|snake ?bite|"
             r"fracture\w*|broken (arm|leg|bone)|medical|dizz(y|iness)|vomit\w*|choking|fever|"
-            r"hit (his|her|my|their|the) head|head (injury|wound)|had a fall)\b"
+            r"hit (his|her|my|their|the) head|head (injury|wound)|had a fall|"
+            r"(?:isn'?t|is not|stopped|not) breathing|turning blue|"
+            r"swallowed (?:a |an |the |some )?(?:coin|(?:button )?batter(?:y|ies)|magnets?|"
+            r"bleach|poison|pills?|tablets?|medicines?|kerosene|chemicals?|something))\b"
             # A person fell ("my grandmother fell", "I slipped and fell", "she has fallen");
-            # things falling ("my phone fell off the table", "a tree fell") are not medical.
+            # things falling ("my phone fell off the table", "a tree fell") are not medical,
+            # and neither are idioms ("I fell asleep", "we fell in love").
             rf"|{_PERSON}(?:\s+(?:has|have|had|just|suddenly|accidentally|also|then|"
-            r"slipped and|tripped and))*\s+(?:fell|fallen)\b",
+            rf"slipped and|tripped and))*\s+(?:fell|fallen)\b{_FELL_IDIOM}",
         ),
     )
 )
@@ -327,6 +359,7 @@ _REQUEST_VERBS = (
 )
 _HIGH_URGENCY = _compile(
     r"\b(trapped|injured|bleeding|dying|drowning|unconscious|not breathing|"
+    r"isn'?t breathing|stopped breathing|turning blue|"
     r"can'?t breathe|cannot breathe|collapsed|urgent(ly)?|immediately|right now|asap|"
     r"life[- ]threatening|save (me|us)|rescue (me|us))\b"
     # A person is stuck ("we are stuck", "my kids are stuck inside"), not a phone or a
@@ -350,11 +383,27 @@ _HIGH_URGENCY = _compile(
     r"some(?:one|body)|any(?:one|body)|needed|required)\b)"
 )
 #: A message that *starts* with "help" ("Help my house is on fire"). Counts as a cry for help
-#: only together with a detected hazard (see :func:`keyword_classify`): "Help desk phone
+#: together with a detected hazard (see :func:`keyword_classify`): "Help desk phone
 #: number?" or "help center hours" name a thing, not an emergency.
 _LEADING_HELP = _compile(
     rf"^\W*help\b(?!\s+(?:me\s+|us\s+)?(?:to\s+)?{_REQUEST_VERBS}\b)"
     r"(?!\s+(?:desk|cent(?:er|re)s?|lines?|page|section|menu|guide|topics?|button|docs?|faq)\b)"
+)
+#: ... or with a person right after it ("Help my son swallowed a coin", "Help, my baby
+#: isn't breathing", "help we can't get out"): someone is in trouble even when no hazard is
+#: named. Not when an ordinary request follows the person ("help my son with his homework",
+#: "help my mum set up the app").
+_LEADING_HELP_FOR_PERSON = _compile(
+    rf"^\W*help\b[\s,!.:;-]*(?:please\b[\s,!.:;-]*)?{_PERSON}\b"
+    rf"(?!\s+(?:to\s+)?{_REQUEST_VERBS}\b)"
+)
+#: Stuck inside somewhere without a subject ("Stuck in my car and the water is rising",
+#: "stuck inside the house, smoke everywhere"): high together with a detected hazard, so
+#: "stuck in the house all day" (bored, not in danger) stays low.
+_STUCK_INSIDE = _compile(
+    r"(?:^|[.!?;,]|\band\b)\W*stuck\s+(?:in|inside)\s+(?:my|our|the|a|an|this|his|her|their)\s+"
+    r"(?:car|vehicle|bus|van|truck|lorry|auto|rickshaw|taxi|cab|house|home|room|flat|"
+    r"apartment|building|shop|office|school|tent|hut)\b"
 )
 #: The hazard is affecting the person right now ("water is entering my house", "up to my
 #: knees"): at least medium urgency, even when phrased as a question ("what should I do?").
@@ -429,10 +478,13 @@ def keyword_classify(message: str) -> ClassifyResponse:
     """Deterministic classifier used when the LLM is unavailable (and as a safety floor)."""
     text = " ".join((message or "").split())
     disaster = next((name for name, pattern in _TYPE_PATTERNS if pattern.search(text)), UNKNOWN)
-    # A leading "help" is a cry for help when the message also names a hazard ("Help my
-    # house is on fire"), not when it names a thing ("Help desk phone number?").
-    high = bool(_HIGH_URGENCY.search(text)) or (
-        disaster != UNKNOWN and bool(_LEADING_HELP.search(text))
+    # A leading "help" is a cry for help when a person follows it ("Help my son swallowed a
+    # coin") or the message also names a hazard ("Help my house is on fire"), not when it
+    # names a thing ("Help desk phone number?"). Likewise "stuck in my car" with a hazard.
+    high = (
+        bool(_HIGH_URGENCY.search(text))
+        or bool(_LEADING_HELP_FOR_PERSON.search(text))
+        or (disaster != UNKNOWN and bool(_LEADING_HELP.search(text) or _STUCK_INSIDE.search(text)))
     )
     seeking = bool(_SEEKING_HELP.search(text))
     info = bool(_ASKING_INFO.search(text))

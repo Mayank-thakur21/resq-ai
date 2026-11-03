@@ -41,6 +41,9 @@ FLOOD_SITUATIONS: list[tuple[str, str, Urgency]] = [
     ("Our area is waterlogged", "flood", "medium"),
     ("Help! Water is entering our house", "flood", "high"),
     ("Help my house is filling with water", "flood", "high"),
+    # Someone stuck inside while the water rises: high even without a subject.
+    ("Stuck in my car and the water is rising", "flood", "high"),
+    ("Stuck in the car, water rising fast", "flood", "high"),
 ]
 
 #: Other hazards, one or more rows each.
@@ -67,6 +70,11 @@ OTHER_HAZARDS: list[tuple[str, str, Urgency]] = [
     ("Grandpa slipped and fell in the bathroom", "medical", "medium"),
     ("She has fallen from the bus", "medical", "medium"),
     ("He fell off a ladder and is not breathing", "medical", "high"),
+    ("My son fell into the canal", "medical", "medium"),
+    ("We fell through the ice", "medical", "medium"),
+    ("My grandfather fell ill last night", "medical", "medium"),
+    ("My baby isn't breathing", "medical", "high"),
+    ("My son swallowed a battery", "medical", "medium"),
     ("My son has a high fever", "medical", "medium"),
     ("Someone fainted at the bus stop", "medical", "medium"),
 ]
@@ -82,6 +90,14 @@ DISTRESS: list[tuple[str, str, Urgency]] = [
     ("SOS", "general", "high"),
     ("I'm stuck under the rubble", "general", "high"),
     ("My kids are stuck inside the building", "general", "high"),
+    # A leading "help" followed by a person in trouble (regression: these were unknown/low
+    # once a leading "help" needed a recognised hazard).
+    ("Help my son swallowed a coin", "medical", "high"),
+    ("Help my baby isn't breathing", "medical", "high"),
+    ("Help my dad is turning blue", "medical", "high"),
+    ("Help my husband is not waking up", "general", "high"),
+    ("help I can't get out", "general", "high"),
+    ("Stuck inside the house and smoke is everywhere", "fire", "high"),
 ]
 
 #: Questions about hazards (preparedness, "what if"): the type is known, urgency stays low.
@@ -127,6 +143,26 @@ NEGATIVES: list[tuple[str, str, Urgency]] = [
     ("My phone is stuck on the loading screen", "unknown", "low"),
     ("I'm stuck in traffic", "unknown", "low"),
     ("I'm knee-deep in paperwork", "unknown", "low"),
+    ("Stuck in the house all day, so bored", "unknown", "low"),
+    ("Stuck in my room studying for exams", "unknown", "low"),
+    # "help" + a person + an ordinary request.
+    ("Help my son with his homework", "unknown", "low"),
+    ("Help my mom set up the app", "unknown", "low"),
+    # "fell" idioms: a person as the subject, nobody hurt.
+    ("I fell asleep on the couch", "unknown", "low"),
+    ("I fell asleep and missed the alert", "unknown", "low"),
+    ("We fell in love at first sight", "unknown", "low"),
+    ("My son fell behind in maths this term", "unknown", "low"),
+    ("She fell for the prank again", "unknown", "low"),
+    ("She fell silent", "unknown", "low"),
+    ("We fell short of the target", "unknown", "low"),
+    # Water moving into, over or through things, not places.
+    ("Water got into my phone, how do I dry it?", "unknown", "low"),
+    ("Water spilled over my laptop keyboard", "unknown", "low"),
+    ("Water is flowing through the new pipes nicely", "unknown", "low"),
+    ("Water got into my ears while swimming", "unknown", "low"),
+    ("The water flows into the tank every morning", "unknown", "low"),
+    ("Water is inside my phone", "unknown", "low"),
 ]
 
 CORPUS = FLOOD_SITUATIONS + OTHER_HAZARDS + DISTRESS + QUESTIONS + NEGATIVES
@@ -176,6 +212,24 @@ async def test_unrecognised_message_still_gets_basic_safety_steps(message: str) 
     assert all(step in result.response for step in steps)
     assert result.recommended_actions == steps
     assert "112" in result.recommended_actions[0]
+
+
+async def test_distress_without_a_named_hazard_gets_the_urgent_protocol() -> None:
+    """Regression: "Help my son swallowed a coin" was answered "Could you provide more
+    details...?" at low urgency."""
+    result = await process_chat("Help my son swallowed a coin", "en", None, llm=None)
+
+    assert result.urgency_level == "high"
+    assert not result.response.startswith(GENERIC_RESPONSE)
+    assert any("ambulance" in action.lower() for action in result.recommended_actions)
+
+
+async def test_fell_asleep_is_not_answered_with_the_medical_protocol() -> None:
+    """Regression: "I fell asleep and missed the alert" got "Call an ambulance immediately"."""
+    result = await process_chat("I fell asleep and missed the alert", "en", None, llm=None)
+
+    assert (result.detected_disaster, result.urgency_level) == ("unknown", "low")
+    assert "ambulance" not in result.response.lower()
 
 
 def test_generic_safety_steps_cover_the_basics() -> None:

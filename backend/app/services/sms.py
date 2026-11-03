@@ -31,7 +31,11 @@ Abuse budgets (checked and consumed atomically before a number is handed to Twil
   it a dozen accounts registered from one address could spend the whole global budget;
 * ``SOS_SMS_PER_PREFIX_LIMIT`` per IPv6 ``/48`` (all its ``/64`` addresses together) — one
   customer commonly holds a ``/48``, so without it accounts spread over its ``/64``
-  networks would each get a fresh per-address budget (IPv4 has no wider bucket);
+  networks would each get a fresh per-address budget (IPv4 has no wider bucket). A ``/48``
+  may also be a carrier pool, and one busy client there can use this budget up for its
+  neighbours, whose SOS then goes out through the native-SMS fallback: a deliberate
+  trade-off, since without it the same client could use up the server-wide budgets below
+  for everyone;
 * ``SOS_SMS_ANONYMOUS_LIMIT`` for all anonymous callers together — a smaller pool, so
   anonymous traffic can never drain what signed-in users need;
 * ``SOS_SMS_NEW_CALLER_LIMIT`` for anonymous callers and recently registered accounts

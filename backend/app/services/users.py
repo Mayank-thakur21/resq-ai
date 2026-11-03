@@ -21,9 +21,10 @@ Bounded work, no held connections
   (:class:`PasswordHashingBusyError`) instead of queueing without limit.
 * :data:`BCRYPT_RESERVED_FOR_QUIET` of those slots are kept for "quiet" callers: jobs
   submitted with ``use_reserve=False`` (the users routes pass that for clients that already
-  ran several bcrypt jobs in the last minute) are refused once the queue holds
-  ``BCRYPT_MAX_PENDING - BCRYPT_RESERVED_FOR_QUIET`` jobs. A few busy clients therefore
-  cannot fill the whole queue: a person signing in for the first time still gets a slot.
+  ran several bcrypt jobs in the last minute, or whose network did: IPv4 ``/24``, IPv6
+  ``/40``) are refused once the queue holds ``BCRYPT_MAX_PENDING - BCRYPT_RESERVED_FOR_QUIET``
+  jobs. A few busy clients, or one network rotating its addresses, therefore cannot fill the
+  whole queue: a person signing in for the first time still gets a slot.
 * No database connection is held while waiting for bcrypt: the lookup's transaction is
   ended (``commit()`` returns the pooled connection) *before* the bcrypt job is queued.
   Earlier versions kept the connection checked out for the whole wait, so a burst of

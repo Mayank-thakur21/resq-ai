@@ -28,9 +28,11 @@ How it is wired
   token is present, else the client IP from :func:`client_ip` reduced by :func:`ip_bucket`
   (IPv4 addresses as-is, IPv6 addresses by their ``/64`` network: one subscriber line or
   cloud host controls a whole ``/64`` and could otherwise pick a fresh bucket per request).
-  Budgets shared by everyone (sign-in attempts and the bcrypt reserve, SOS SMS) also count
-  IPv6 clients per ``/48`` (:func:`ip_prefix_bucket`) with higher limits, because one
-  customer often holds a ``/48`` or ``/56`` and could rotate through its ``/64`` networks.
+  Budgets shared by everyone (sign-in attempts, SOS SMS) also count IPv6 clients per
+  ``/48`` (:func:`ip_prefix_bucket`) with higher limits, because one customer often holds a
+  ``/48`` or ``/56`` and could rotate through its ``/64`` networks. The bcrypt reserve's
+  priority budget counts whole networks (:func:`ip_network_bucket`: IPv4 ``/24``, IPv6
+  ``/40``).
 * :func:`client_ip` never trusts a client-supplied address. It uses, in this order:
 
   1. ``X-ResQ-Client-IP`` — only when the request also carries a valid ``X-Internal-Key``,
@@ -405,12 +407,18 @@ in_flight = ConcurrencyLimiter()
 known_clients = KnownClients(per_account=8, max_accounts=50_000, ttl_seconds=14 * 86_400)
 #: IPv6 clients share one bucket per network of this prefix length (one subscriber line).
 IPV6_BUCKET_PREFIX = 64
-#: Wider IPv6 network counted *in addition* for the shared budgets (sign-in attempts, the
-#: bcrypt reserve, SOS SMS): ISPs and hosting providers commonly hand one customer a ``/48``
-#: or ``/56``, i.e. 256 to 65,536 ``/64`` subjects, so per-``/64`` limits alone can be
-#: multiplied by rotating networks. Limits on this bucket are set well above the ``/64``
-#: ones because a ``/48`` may also be shared by many unrelated users of one carrier.
+#: Wider IPv6 network counted *in addition* for the shared budgets (sign-in attempts and
+#: in-flight sign-ins, registrations, SOS SMS): ISPs and hosting providers commonly hand one
+#: customer a ``/48`` or ``/56``, i.e. 256 to 65,536 ``/64`` subjects, so per-``/64`` limits
+#: alone can be multiplied by rotating networks. Limits on this bucket are set well above
+#: the ``/64`` ones because a ``/48`` may also be shared by many unrelated users of one
+#: carrier.
 IPV6_PREFIX_BUCKET = 48
+#: Networks counted together for the bcrypt reserve of the sign-in throttle only (see
+#: :func:`ip_network_bucket`): an IPv4 ``/24`` (the smallest block routed on the internet,
+#: often one hosting customer's) and an IPv6 ``/40`` (256 ``/48`` customers of one provider).
+IPV4_NETWORK_BUCKET = 24
+IPV6_NETWORK_BUCKET = 40
 
 
 def normalise_ip(value: str | None) -> str | None:
@@ -470,6 +478,29 @@ def ip_prefix_bucket(address: str) -> str | None:
     if not isinstance(parsed, ipaddress.IPv6Address) or parsed.ipv4_mapped is not None:
         return None
     return str(ipaddress.IPv6Network((parsed, IPV6_PREFIX_BUCKET), strict=False))
+
+
+def ip_network_bucket(address: str) -> str | None:
+    """The wide network of a client address: IPv4 ``/24``, IPv6 ``/40``.
+
+    ``203.0.113.77`` -> ``203.0.113.0/24``, ``2001:db8:7712:34::1`` -> ``2001:db8:7700::/40``
+    (IPv4-mapped IPv6 counts as IPv4). ``None`` for anything that is not an address.
+
+    Only for budgets that decide *priority*, never for refusals (the sign-in throttle's
+    "quiet" budget for the bcrypt reserve): networks this wide are routinely shared by
+    unrelated people, but holding a few hundred addresses in one of them is also cheap
+    (a hosting customer's ``/24``, a provider's ``/48`` customers), and without it each of
+    those addresses or ``/48`` networks would bring a fresh budget of its own.
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if parsed.ipv4_mapped is None:
+            return str(ipaddress.IPv6Network((parsed, IPV6_NETWORK_BUCKET), strict=False))
+        parsed = parsed.ipv4_mapped
+    return str(ipaddress.IPv4Network((parsed, IPV4_NETWORK_BUCKET), strict=False))
 
 
 def is_internal_caller(request: Request) -> bool:

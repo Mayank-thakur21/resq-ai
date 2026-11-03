@@ -764,10 +764,10 @@ def test_prefix_budgets_keep_one_48_below_the_shared_bcrypt_queue() -> None:
 
     reserve = user_service.BCRYPT_RESERVED_FOR_QUIET
     unreserved = user_service.BCRYPT_MAX_PENDING - reserve
-    assert _limit_amount(user_routes.QUIET_PREFIX_BCRYPT_JOBS) < reserve
+    assert _limit_amount(user_routes.QUIET_NETWORK_BCRYPT_JOBS) < reserve
     assert unreserved > user_routes.MAX_VERIFY_IN_FLIGHT_PER_PREFIX
-    # The /48 buckets are wider than, and so never tighter than, the per-client ones.
-    assert _limit_amount(user_routes.QUIET_PREFIX_BCRYPT_JOBS) > _limit_amount(
+    # The wider buckets are wider than, and so never tighter than, the per-client ones.
+    assert _limit_amount(user_routes.QUIET_NETWORK_BCRYPT_JOBS) > _limit_amount(
         user_routes.QUIET_CLIENT_BCRYPT_JOBS
     )
     assert user_routes.MAX_VERIFY_IN_FLIGHT_PER_PREFIX > user_routes.MAX_VERIFY_IN_FLIGHT_PER_CLIENT
@@ -834,7 +834,7 @@ async def test_rotating_64s_of_one_48_are_not_quiet_clients(
 
     monkeypatch.setattr(user_service, "BCRYPT_MAX_PENDING", 8)
     monkeypatch.setattr(user_service, "BCRYPT_RESERVED_FOR_QUIET", 3)
-    monkeypatch.setattr(user_routes, "QUIET_PREFIX_BCRYPT_JOBS", "2/minute")
+    monkeypatch.setattr(user_routes, "QUIET_NETWORK_BCRYPT_JOBS", "2/minute")
     monkeypatch.setattr(user_routes, "MAX_VERIFY_IN_FLIGHT_PER_PREFIX", 100)  # tested below
 
     async def submit(headers: dict[str, str]) -> asyncio.Task[httpx.Response]:
@@ -1080,3 +1080,118 @@ def test_known_client_still_signs_in_while_both_account_buckets_are_full(
     assert known_clients.ttl_seconds == 14 * 86_400
     monkeypatch.setattr(known_clients, "_clock", lambda: later)
     assert verify(client, owner, "asha@example.com", "correct horse 42").status_code == 429
+
+
+# ----------------------------------------------------------------------------------------------
+# Review round 5: a busy client on a shared /48 does not lock known neighbours out; the
+# bcrypt reserve's quiet budget is counted per IPv4 /24 and IPv6 /40
+# ----------------------------------------------------------------------------------------------
+def test_known_neighbour_still_signs_in_while_the_48_attempt_bucket_is_full(
+    client: TestClient, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the /48 attempt bucket refused everyone on the /48, so one client on a
+    shared carrier pool (wrong guesses to made-up emails from a few /64s) locked every
+    neighbour out of email/password sign-in, including people who had signed in from their
+    own /64 just before."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_routes, "VERIFY_ATTEMPTS_PER_PREFIX", "6/minute")
+    register(client, internal_headers)
+    neighbour = from_client(_v6(0xFFFF), internal_headers)
+    assert verify(client, neighbour, "asha@example.com", "correct horse 42").status_code == 200
+    # The neighbour's sign-in counted in the /48 bucket: the attacker gets the other 5.
+    attacker = [
+        verify(
+            client, from_client(_v6(i % 4), internal_headers), f"x{i}@example.com", "g"
+        ).status_code
+        for i in range(8)
+    ]
+    assert attacker == [401] * 5 + [429] * 3
+
+    # Known (this /64 signed in to this account recently): still checked, right or wrong...
+    assert verify(client, neighbour, "asha@example.com", "correct horse 42").status_code == 200
+    assert verify(client, neighbour, "asha@example.com", "typo").status_code == 401
+    # ... and still bounded by its own buckets (5 failures per client and account).
+    statuses = [verify(client, neighbour, "asha@example.com", "typo").status_code for _ in range(5)]
+    assert statuses == [401] * 4 + [429]
+    # Not known for another account, and not known from another /64 of the /48: refused.
+    register(client, internal_headers, email="ravi@example.com")
+    assert verify(client, neighbour, "ravi@example.com", "correct horse 42").status_code == 429
+    stranger = from_client(_v6(0xFFFE), internal_headers)
+    assert verify(client, stranger, "asha@example.com", "correct horse 42").status_code == 429
+
+
+def test_known_clients_still_count_in_the_48_attempt_bucket(
+    client: TestClient, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exempt from refusal, not from counting: known sign-ins use up the /48's budget for
+    everyone else while it has room."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_routes, "VERIFY_ATTEMPTS_PER_PREFIX", "4/minute")
+    register(client, internal_headers)
+    owner = from_client(_v6(1), internal_headers)
+    statuses = [
+        verify(client, owner, "asha@example.com", "correct horse 42").status_code for _ in range(4)
+    ]
+    assert statuses == [200] * 4
+    other = from_client(_v6(2), internal_headers)
+    assert verify(client, other, "x@example.com", "g").status_code == 429
+
+
+@pytest.mark.parametrize(
+    "rotating_address",
+    [
+        pytest.param(lambda i: f"198.18.0.{i + 1}", id="ipv4-addresses-of-one-24"),
+        pytest.param(lambda i: f"2001:db8:{0x7700 + i:x}:1::1", id="ipv6-48s-of-one-40"),
+    ],
+)
+async def test_rotating_addresses_of_one_network_are_not_quiet_clients(
+    settings: Settings,
+    internal_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    rotating_address: Callable[[int], str],
+) -> None:
+    """Regression: every IPv4 address (no wider bucket) and every /48 had a quiet budget of
+    its own, so 256 addresses of one /24, or the 256 /48s of one /40, kept the slots
+    reserved for first-time sign-ins full and fresh clients got 503."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_service, "BCRYPT_MAX_PENDING", 8)
+    monkeypatch.setattr(user_service, "BCRYPT_RESERVED_FOR_QUIET", 3)
+    monkeypatch.setattr(user_routes, "QUIET_NETWORK_BCRYPT_JOBS", "2/minute")
+
+    async def submit(headers: dict[str, str]) -> asyncio.Task[httpx.Response]:
+        before = user_service.pending_bcrypt_jobs()
+        task = asyncio.create_task(_verify_async(http, headers, "correct horse 42"))
+        await _wait_until(lambda: task.done() or user_service.pending_bcrypt_jobs() > before)
+        return task
+
+    async with running_app(settings) as (_, http):
+        await _register_async(http, internal_headers)
+        gate = _gate_check_password(monkeypatch)
+        flood = [
+            await submit(from_client(rotating_address(i), internal_headers)) for i in range(10)
+        ]
+        # Two quiet jobs for the whole network, then only the 8 - 3 = 5 unreserved slots.
+        assert user_service.pending_bcrypt_jobs() == 5
+        assert [t.result().status_code for t in flood if t.done()] == [503] * 5
+
+        newcomer = await submit(from_client("198.51.100.7", internal_headers))
+        assert not newcomer.done()
+        assert user_service.pending_bcrypt_jobs() == 6
+        gate.set()
+        assert (await newcomer).status_code == 200
+        assert sorted(r.status_code for r in await asyncio.gather(*flood)) == [200] * 5 + [503] * 5
+    assert user_service.pending_bcrypt_jobs() == 0
+
+
+def test_quiet_budget_is_counted_per_ipv4_24_and_ipv6_40() -> None:
+    from app.core.rate_limit import ip_network_bucket
+
+    assert ip_network_bucket("203.0.113.77") == "203.0.113.0/24"
+    assert ip_network_bucket("::ffff:203.0.113.9") == "203.0.113.0/24"
+    assert ip_network_bucket("2001:db8:7712:34::1") == "2001:db8:7700::/40"
+    assert ip_network_bucket("2001:db8:77ff:ffff::1") == "2001:db8:7700::/40"
+    assert ip_network_bucket("2001:db8:7800::1") == "2001:db8:7800::/40"
+    assert ip_network_bucket("unknown") is None

@@ -41,29 +41,46 @@ the internal key, see :func:`app.core.rate_limit.forwarded_client_ip`) and we ap
   each one costs a bcrypt check, so without these a handful of clients could keep the
   shared bcrypt queue full and every other sign-in would get ``503``. The ``/48`` bucket
   stops one customer from multiplying the per-client budget by rotating its ``/64``
-  networks. Finally, :data:`VERIFY_SUCCESSES_PER_ACCOUNT` caps *successful* sign-ins per
-  account from all clients together: looping one valid account from many networks is the
-  cheapest flood, and only someone holding the password can use this budget up, so it can
-  never be used to lock out someone else.
+  networks. A ``/48`` can also be a carrier pool shared by many people, so one busy client
+  there must not lock its neighbours out of their own accounts: a known client (see above)
+  is never *refused* by the ``/48`` bucket (it is still counted while the bucket has room).
+  It stays bounded by its own per-client buckets, and the ``/48``'s in-flight cap and the
+  quiet budget below still apply to it, so the bcrypt queue invariants hold. Someone signing in
+  from a network the account has not signed in from recently cannot be told apart from the
+  busy client, and still waits for the ``/48`` window (or uses OAuth). Finally,
+  :data:`VERIFY_SUCCESSES_PER_ACCOUNT` caps *successful* sign-ins per account from all
+  clients together: looping one valid account from many networks is the cheapest flood,
+  and only someone holding the password can use this budget up, so it can never be used to
+  lock out someone else.
 
 * ``/register`` — :data:`REGISTER_PER_CLIENT` per end client and
   :data:`REGISTER_PER_PREFIX` per IPv6 ``/48`` (bcrypt is expensive, and every account is
-  another SOS SMS budget).
+  another SOS SMS budget). A new user has no history that tells them apart from a busy
+  client on the same ``/48``, so while that client keeps the ``/48`` budget full, sign-ups
+  from it wait for the window (existing accounts, OAuth and anonymous use are unaffected).
 
 * Both — a client may have at most :data:`MAX_VERIFY_IN_FLIGHT_PER_CLIENT` requests in
   flight, an IPv6 ``/48`` at most :data:`MAX_VERIFY_IN_FLIGHT_PER_PREFIX` (further
   concurrent ones get 429 at once). A client's first :data:`QUIET_CLIENT_BCRYPT_JOBS`
   bcrypt jobs per minute (sign-ins and sign-ups together) may use the whole bcrypt queue,
-  provided its ``/48`` has not run more than :data:`QUIET_PREFIX_BCRYPT_JOBS` either; busier
-  clients leave :data:`app.services.users.BCRYPT_RESERVED_FOR_QUIET` slots free, so someone
-  signing in for the first time is admitted even while busy clients keep the rest of the
-  queue full. Two invariants make that hold against a single ``/48`` however it rotates its
-  ``/64`` networks: its quiet jobs per minute stay below the reserve, and its requests in
-  flight stay below the unreserved part of the queue (tests pin both).
+  provided its network (IPv4 ``/24``, IPv6 ``/40``) has not run more than
+  :data:`QUIET_NETWORK_BCRYPT_JOBS` either; busier clients leave
+  :data:`app.services.users.BCRYPT_RESERVED_FOR_QUIET` slots free, so someone signing in
+  for the first time is admitted even while busy clients keep the rest of the queue full.
+  Two invariants make that hold against a single network however it rotates its addresses
+  (256 IPv4 addresses, 65,536 ``/64`` networks of one ``/48`` or the 256 ``/48`` networks
+  of one ``/40``): its quiet jobs per minute stay below the reserve, and an IPv6 ``/48``'s
+  requests in flight stay below the unreserved part of the queue (tests pin both). Being
+  quiet is only a priority, never a refusal, which is why it can be counted over networks
+  this wide. Attackers holding addresses in dozens of such networks can still use the
+  reserve up (each network adds its own quiet budget); the reserve is a defence against
+  one customer, not against a botnet.
 
 Client addresses are bucketed with :func:`app.core.rate_limit.ip_bucket` (IPv6 by ``/64``)
 and, for the shared budgets above, :func:`app.core.rate_limit.ip_prefix_bucket` (IPv6 by
-``/48``; IPv4 clients have no wider bucket, so nothing changes for them). Per-client buckets
+``/48``; IPv4 clients have no such bucket, so these limits change nothing for them) and,
+for the quiet budget only, :func:`app.core.rate_limit.ip_network_bucket` (IPv4 ``/24``,
+IPv6 ``/40``). Per-client buckets
 are skipped when the client address is unknown (an older frontend that does not send
 ``X-ResQ-Client-IP``): sharing one bucket between all users would turn the limit into a
 site-wide lock-out. The account buckets then apply to every caller (without the escape
@@ -91,6 +108,7 @@ from app.core.rate_limit import (
     forwarded_client_ip,
     in_flight,
     ip_bucket,
+    ip_network_bucket,
     ip_prefix_bucket,
     known_clients,
     limiter,
@@ -136,10 +154,13 @@ MAX_VERIFY_IN_FLIGHT_PER_CLIENT = 4
 MAX_VERIFY_IN_FLIGHT_PER_PREFIX = 16
 #: bcrypt jobs per end client and minute that may use the reserved part of the bcrypt queue.
 QUIET_CLIENT_BCRYPT_JOBS = "3/minute"
-#: bcrypt jobs per IPv6 ``/48`` and minute that may use the reserved part of the queue. Must
-#: stay below ``BCRYPT_RESERVED_FOR_QUIET`` (8), so one ``/48`` can never occupy the whole
-#: reserve: without it, every fresh ``/64`` of a ``/48`` counted as a new "quiet" client.
-QUIET_PREFIX_BCRYPT_JOBS = "6/minute"
+#: bcrypt jobs per network (IPv4 ``/24``, IPv6 ``/40``, see
+#: :func:`~app.core.rate_limit.ip_network_bucket`) and minute that may use the reserved part
+#: of the queue. Must stay below ``BCRYPT_RESERVED_FOR_QUIET`` (8), so one network can never
+#: occupy the whole reserve: without it, every fresh ``/64`` of a ``/48`` (and, before the
+#: bucket was widened from ``/48``, every ``/48`` of a ``/40`` and every IPv4 address of a
+#: ``/24``) counted as a new "quiet" client.
+QUIET_NETWORK_BCRYPT_JOBS = "6/minute"
 #: Backwards-compatible alias (earlier versions counted every attempt per email).
 VERIFY_ATTEMPTS_PER_EMAIL = VERIFY_FAILURES_PER_ACCOUNT
 _INVALID_CREDENTIALS = "Invalid email or password."
@@ -156,7 +177,7 @@ _SUCCESSES = "users-verify-successes"
 _REGISTER = "users-register"
 _REGISTER_PREFIX = "users-register-prefix"
 _RECENT = "users-bcrypt-recent"
-_RECENT_PREFIX = "users-bcrypt-recent-prefix"
+_RECENT_NETWORK = "users-bcrypt-recent-network"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +200,8 @@ class _Client:
     subject: str
     #: ``ip_prefix_bucket`` (IPv6 ``/48``); ``None`` for IPv4 (no wider bucket is counted).
     prefix: str | None
+    #: ``ip_network_bucket`` (IPv4 ``/24``, IPv6 ``/40``): only for the quiet budget.
+    network: str | None
 
 
 def _active_limiter(request: Request) -> RateLimiter | None:
@@ -202,7 +225,11 @@ def _client(request: Request) -> _Client | None:
     address = forwarded_client_ip(request)
     if address is None:
         return None
-    return _Client(subject=ip_bucket(address), prefix=ip_prefix_bucket(address))
+    return _Client(
+        subject=ip_bucket(address),
+        prefix=ip_prefix_bucket(address),
+        network=ip_network_bucket(address),
+    )
 
 
 def _raise_limited(state: RateLimitState, message: str) -> None:
@@ -224,24 +251,27 @@ def _first_refusal(active: RateLimiter, buckets: list[_Bucket]) -> RateLimitStat
 def _is_quiet(active: RateLimiter, request: Request, client: _Client | None) -> bool:
     """Count one bcrypt job of ``client``; ``True`` while it is among the first few.
 
-    Quiet means: the client's own subject *and* its IPv6 ``/48`` both still have room in
-    their per-minute budgets. Both are counted for every job (a busy ``/64`` still adds to
-    its ``/48``), so a ``/48`` rotating through fresh ``/64`` networks stops being quiet
-    after :data:`QUIET_PREFIX_BCRYPT_JOBS` jobs. Unknown clients (no reported address)
-    cannot be told apart, so they keep the whole queue, as before this distinction existed.
+    Quiet means: the client's own subject *and* its network (IPv4 ``/24``, IPv6 ``/40``)
+    both still have room in their per-minute budgets. Both are counted for every job (a
+    busy client still adds to its network), so a network rotating through fresh addresses,
+    ``/64`` or ``/48`` networks stops being quiet after :data:`QUIET_NETWORK_BCRYPT_JOBS`
+    jobs. (The network bucket replaces a ``/48`` one with the same limit: every ``/48`` lies
+    inside one ``/40``, so the ``/40`` bucket is always at least as tight.) Unknown clients
+    (no reported address) cannot be told apart, so they keep the whole queue, as before
+    this distinction existed.
     """
     if client is None:
         return True
     quiet = active.hit(
         QUIET_CLIENT_BCRYPT_JOBS, _RECENT, _keyed(request, "bcrypt-recent", client.subject)
     ).allowed
-    if client.prefix is not None:
-        prefix_quiet = active.hit(
-            QUIET_PREFIX_BCRYPT_JOBS,
-            _RECENT_PREFIX,
-            _keyed(request, "bcrypt-recent-prefix", client.prefix),
+    if client.network is not None:
+        network_quiet = active.hit(
+            QUIET_NETWORK_BCRYPT_JOBS,
+            _RECENT_NETWORK,
+            _keyed(request, "bcrypt-recent-network", client.network),
         ).allowed
-        quiet = quiet and prefix_quiet
+        quiet = quiet and network_quiet
     return quiet
 
 
@@ -350,24 +380,36 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
     pair: _Bucket | None = None
     client_bucket: _Bucket | None = None
     #: Never refunded: every attempt costs a bcrypt check, whatever its outcome.
-    attempt_buckets: list[_Bucket] = []
+    client_attempts: _Bucket | None = None
+    prefix_attempts: _Bucket | None = None
     if client is not None:
         address = _keyed(request, "verify-client", client.subject)
         pair = _Bucket(VERIFY_FAILURES_PER_CLIENT_ACCOUNT, (_PAIR, address, account))
         client_bucket = _Bucket(VERIFY_FAILURES_PER_CLIENT, (_CLIENT, address))
-        attempt_buckets.append(_Bucket(VERIFY_ATTEMPTS_PER_CLIENT, (_ATTEMPTS, address)))
+        client_attempts = _Bucket(VERIFY_ATTEMPTS_PER_CLIENT, (_ATTEMPTS, address))
         if client.prefix is not None:
             network = _keyed(request, "verify-prefix", client.prefix)
-            attempt_buckets.append(_Bucket(VERIFY_ATTEMPTS_PER_PREFIX, (_ATTEMPTS_PREFIX, network)))
+            prefix_attempts = _Bucket(VERIFY_ATTEMPTS_PER_PREFIX, (_ATTEMPTS_PREFIX, network))
         attempt.known_key = (_compact(account), _compact(address))
+    attempt_buckets = [b for b in (client_attempts, prefix_attempts) if b is not None]
     account_bucket = _Bucket(VERIFY_FAILURES_PER_ACCOUNT, (_ACCOUNT, account))
     overflow_bucket = _Bucket(VERIFY_OVERFLOW_PER_ACCOUNT, (_OVERFLOW, account))
     success_bucket = _Bucket(VERIFY_SUCCESSES_PER_ACCOUNT, (_SUCCESSES, account))
+    #: This client signed in to this account successfully not long ago.
+    known = attempt.known_key is not None and attempt.known_clients.knows(*attempt.known_key)
 
     _take_in_flight_slots(request, attempt, client)
     try:
         own_buckets = [bucket for bucket in (pair, client_bucket) if bucket is not None]
-        refusal = _first_refusal(active, [*own_buckets, *attempt_buckets, success_bucket])
+        checked = [*own_buckets, *attempt_buckets, success_bucket]
+        if known and prefix_attempts is not None:
+            # A /48 may be a carrier pool: one busy client there must not lock its
+            # neighbours out of their own accounts. A known client is bounded by its own
+            # buckets above (and the /48's in-flight cap and the quiet budget still apply),
+            # so it is never refused by the /48 bucket; the hit below still counts it while
+            # the bucket has room.
+            checked.remove(prefix_attempts)
+        refusal = _first_refusal(active, checked)
         if refusal is not None:
             _raise_limited(refusal, _TOO_MANY_SIGN_INS)
 
@@ -375,7 +417,7 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
         account_state = active.peek(account_bucket.limit, *account_bucket.identifiers)
         if account_state.allowed:
             to_reserve.append(account_bucket)
-        elif attempt.known_key is not None and attempt.known_clients.knows(*attempt.known_key):
+        elif known:
             # Someone else's guessing filled the account bucket; this client signed in to
             # the account recently, so it may still try (bounded by its own failure buckets).
             logger.info("Account sign-in bucket full; admitting a known client")
@@ -401,7 +443,9 @@ def _begin_verify(request: Request, email: str) -> _Attempt:
             active.hit(bucket.limit, *bucket.identifiers)
             attempt.reserved.append(bucket)
         for bucket in attempt_buckets:
-            active.hit(bucket.limit, *bucket.identifiers)  # never refunded
+            # Never refunded. Cannot be refused either (peeked above), except the /48
+            # bucket of a known client, which is then simply not counted.
+            active.hit(bucket.limit, *bucket.identifiers)
         attempt.success_bucket = success_bucket
         attempt.quiet = _is_quiet(active, request, client)
     except BaseException:

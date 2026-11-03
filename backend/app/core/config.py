@@ -91,7 +91,9 @@ class Settings(BaseSettings):
     sos_sms_per_address_limit: str = "60/hour;200/day"
     # Twilio SMS per IPv6 /48 network (all its /64 addresses, signed in or not), so one
     # customer rotating through the /64 networks of its /48 shares one budget. Higher than
-    # the per-address budget: a /48 may also be a carrier pool shared by many people.
+    # the per-address budget: a /48 may also be a carrier pool shared by many people (one
+    # busy client can still use it up for everyone on its /48, whose SOS then offers the
+    # phone's own SMS app; without it, that client could use up the server-wide budgets).
     # IPv4 addresses have no wider bucket (the per-address budget applies).
     sos_sms_per_prefix_limit: str = "150/hour;600/day"
     # Twilio SMS for all anonymous callers together (a part of the global budget that

@@ -522,6 +522,55 @@ def test_keyword_classify(message: str, expected: tuple[str, str, str]) -> None:
 
 
 @pytest.mark.parametrize(
+    ("message", "disaster", "urgency"),
+    [
+        # Regression: without Gemini these all got unknown/low and a generic "tell me more".
+        ("Water is entering my house after heavy rain. What should I do?", "flood", "medium"),
+        ("Heavy rain and the water level is up to my knees inside the house", "flood", "medium"),
+        ("My street is under water", "flood", "medium"),
+        ("Water entering home, kids with me", "flood", "medium"),
+        ("The river overflowed into our village", "flood", "medium"),
+        ("Our home is submerged", "flood", "medium"),
+        ("Water coming into the house", "flood", "medium"),
+        ("The river burst its banks", "flood", "medium"),
+        ("The dam broke", "flood", "medium"),
+        ("My basement is full of water", "flood", "medium"),
+        ("The ground is shaking", "earthquake", "medium"),
+        ("Strong winds are tearing roofs off", "storm", "medium"),
+        ("It is extremely hot and my father is dizzy", "heatwave", "medium"),
+        ("My grandmother fell and hit her head", "medical", "medium"),
+        ("Help, water is entering my house", "flood", "high"),
+        # Questions about the future stay low; an ongoing hazard does not.
+        ("Will there be heavy rain tomorrow?", "flood", "low"),
+        ("How do I protect my house from floods?", "flood", "low"),
+        ("Water is up to my waist, what should I do?", "flood", "medium"),
+        # No false alarms from everyday words.
+        ("A tree fell on the road", "unknown", "low"),
+        ("Should I drink more water in summer?", "unknown", "low"),
+    ],
+)
+def test_keyword_classify_everyday_descriptions(message: str, disaster: str, urgency: str) -> None:
+    result = keyword_classify(message)
+    assert (result.disaster_type, result.urgency) == (disaster, urgency)
+
+
+async def test_flood_description_without_llm_gets_safety_steps() -> None:
+    """Regression: "Water is entering my house" got URGENCY: LOW and the generic reply."""
+    from app.agents.router_agent import GENERIC_RESPONSE, process_chat
+
+    result = await process_chat(
+        "Water is entering my house after heavy rain. What should I do?",
+        "en",
+        None,
+        llm=None,
+    )
+    assert result.detected_disaster == "flood"
+    assert result.urgency_level == "medium"
+    assert result.response != GENERIC_RESPONSE
+    assert result.recommended_actions
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         ("Hurricane", "cyclone"),

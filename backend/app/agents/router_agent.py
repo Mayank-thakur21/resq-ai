@@ -203,10 +203,29 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     for name, pattern in (
         ("tsunami", r"\btsunamis?\b"),
         ("cyclone", r"\b(cyclone|hurricane|typhoon)s?\b"),
-        ("earthquake", r"\b(earthquake|quake|tremor|aftershock)s?\b|\bseismic\b"),
+        (
+            "earthquake",
+            r"\b(earthquake|quake|tremor|aftershock)s?\b|\bseismic\b"
+            r"|\b(ground|earth|building|house|floor|walls?|everything) (is |was |keeps )?"
+            r"(shaking|trembling|swaying)\b",
+        ),
         ("landslide", r"\b(landslide|mudslide|landslip|rockfall)s?\b"),
-        ("flood", r"\bflood\w*|\binundat\w*|\bwaterlogg\w*|\bwater (is )?rising\b|\brising water"),
-        ("heatwave", r"\bheat ?waves?\b|\b(heat|sun) ?stroke\b|\bextreme heat\b|\bscorching\b"),
+        (
+            "flood",
+            r"\bflood\w*|\binundat\w*|\bwaterlogg\w*|\bwater (is )?rising\b|\brising water"
+            # "water is entering my house", "water coming into the house", "water inside"
+            r"|\bwater (is |was |has been |keeps )?(entering|coming in|coming into|coming inside|"
+            r"getting in|getting into|pouring in|pouring into|seeping in|seeping into|inside)\b"
+            r"|\b(under ?water|submerged|knee[- ]deep|waist[- ]deep|chest[- ]deep)\b"
+            r"|\bwater[- ]?level\b|\bwater (is )?up ?to (my|our|the) (knees?|waist|chest|neck)\b"
+            r"|\boverflow\w*|\bburst (its|their) banks?\b|\bdam (broke|burst|breach\w*|failed)\b"
+            r"|\bfull of water\b|\bheavy rain\w*|\bcloud ?burst\b",
+        ),
+        (
+            "heatwave",
+            r"\bheat ?waves?\b|\b(heat|sun) ?stroke\b|\bextreme heat\b|\bscorching\b"
+            r"|\b(extremely|unbearably|dangerously) hot\b|\bheat exhaustion\b",
+        ),
         ("coldwave", r"\bcold ?waves?\b|\bfrostbite\b|\bhypothermia\b|\bblizzards?\b"),
         (
             "gas_leak",
@@ -217,7 +236,12 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             r"\b(wild)?fires?\b(?! ?(station|brigade|department|service|extinguisher|fighter))"
             r"|\bblaze\b|\bflames?\b|\bburning\b|\bsmoke\b",
         ),
-        ("storm", r"\b(thunder ?storm|storm|tornado|hail ?storm|gale)s?\b|\blightning\b"),
+        (
+            "storm",
+            r"\b(thunder ?storm|storm|tornado|hail ?storm|gale)s?\b|\blightning\b"
+            r"|\b(strong|high|heavy|violent|gale[- ]force) winds?\b"
+            r"|\broofs? (blown|torn|ripped)\w*|\b(tearing|blowing|ripping) (the )?roofs?\b",
+        ),
         ("volcano", r"\bvolcan\w*|\beruption\b|\blava\b"),
         ("drought", r"\bdroughts?\b"),
         ("accident", r"\b(accident|crash|collision)s?\b|\bcollided\b|\bhit by a\b"),
@@ -225,7 +249,9 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             "medical",
             r"\b(injur\w*|bleed\w*|unconscious|heart attack|not breathing|can'?t breathe|"
             r"chest pain|ambulance|faint\w*|seizure|stroke|overdose|poison\w*|snake ?bite|"
-            r"fracture\w*|broken (arm|leg|bone)|medical)\b",
+            r"fracture\w*|broken (arm|leg|bone)|medical|dizz(y|iness)|vomit\w*|choking|fever|"
+            r"hit (his|her|my|their|the) head|head (injury|wound)|had a fall|"
+            r"(fell|fallen) (down|off|from|over))\b",
         ),
     )
 )
@@ -234,7 +260,16 @@ _HIGH_URGENCY = _compile(
     r"can'?t breathe|cannot breathe|collapsed|sos|urgent(ly)?|immediately|right now|asap|"
     r"life[- ]threatening|save (me|us)|rescue (me|us)|please help)\b"
     r"|\bemergency\b(?! ?(kit|bag|numbers?|contacts?|plan|supplies))"
-    r"|(?<!can you )(?<!could you )\bhelp (me|us)\b|\bhelp\s*!"
+    r"|(?<!can you )(?<!could you )\bhelp (me|us)\b|\bhelp\s*!|^\W*help\b(?! (me )?(to|with)\b)"
+)
+#: The hazard is affecting the person right now ("water is entering my house", "up to my
+#: knees"): at least medium urgency, even when phrased as a question ("what should I do?").
+_ONGOING = _compile(
+    r"\b(is|are|was|has been|keeps) (entering|coming in(to|side)?|getting in(to)?|pouring in(to)?|"
+    r"seeping in(to)?|rising|shaking|trembling|collapsing|burning|on fire|under ?water|"
+    r"flooded|flooding|submerged)\b"
+    r"|\b(entering|inside|into) (my|our|the) (house|home|flat|room|building|basement)\b"
+    r"|\bup ?to (my|our|the) (knees?|waist|chest|neck|ankles?)\b|\b(knee|waist|chest)[- ]deep\b"
 )
 _SEEKING_HELP = _compile(
     r"\b(help|rescue|sos|trapped|stuck|evacuat\w*|nearest|nearby|near me|"
@@ -242,7 +277,7 @@ _SEEKING_HELP = _compile(
     r"where (is|are|can)|take me)\b"
 )
 _ASKING_INFO = _compile(
-    r"^(how|what|which|when|why|should|is it|are there|do i|does)\b"
+    r"^(how|what|which|when|why|should|will|is it|is there|are there|do i|does)\b"
     r"|\b(prepare|preparing|preparedness|checklist|kit|tips|advice|advise|precautions?|"
     r"safety (measures|tips|rules)|what to do|how (to|do|can|should)|forecast|weather)\b"
 )
@@ -291,7 +326,7 @@ def keyword_classify(message: str) -> ClassifyResponse:
         urgency = "high"
         if disaster == UNKNOWN:
             disaster = GENERAL
-    elif disaster != UNKNOWN and intent != "asking_info":
+    elif disaster != UNKNOWN and (intent != "asking_info" or _ONGOING.search(text)):
         urgency = "medium"
     else:
         urgency = "low"

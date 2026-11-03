@@ -484,11 +484,14 @@ or `http://localhost` for development.
 - **Sign-out** clears the service worker's API cache (from the page itself, so it also works
   after a hard reload, and responses still in flight are not stored afterwards), the tab's
   chat transcript and incident draft, the last location and the remembered SOS name, and
-  unlinks this device's push subscription from the account (`lib/sign-out.ts`). When a
-  different account signs in without a sign-out in between (e.g. after the session expired),
-  the previous account's cached data is cleared the same way
+  unlinks this device's push subscription from the account (`lib/sign-out.ts`); signing in
+  re-links it, so test notifications reach the device that shows "On". The data is cleared
+  twice: right away, and again once the sign-out request has deleted the session cookie, so
+  nothing fetched with the old session in between (a periodic refresh, another tab) stays
+  cached. The app's data refreshes are paused meanwhile, and the signed-out page is a full
+  page load. When a different account signs in without a sign-out in between (e.g. after the
+  session expired), the previous account's cached data is cleared the same way
   (`components/SessionDataGuard.tsx`).
-  Signing in re-links it, so test notifications reach the device that shows "On".
 - **Icons** are generated from SVG artwork with `npm run icons`
   (`frontend/scripts/generate-icons.mjs`, uses the `sharp` that ships with Next.js). The script
   writes every PWA icon, the favicon and `app/favicon.ico`, and verifies their sizes.

@@ -275,8 +275,11 @@ Empty values mean "not configured". The matching feature switches off or falls b
 | `SOS_SMS_PER_NUMBER_LIMIT` | `3/hour;10/day` | Twilio SOS SMS per destination number (keyed hash). Numbers over budget are reported in `sms.failed` and covered by `fallback_sms_uri`. |
 | `SOS_SMS_PER_CLIENT_LIMIT` | `30/hour;100/day` | Twilio SOS SMS per caller (signed-in user id, else client address with IPv6 by `/64`), so one caller cannot use up the shared budgets with made-up numbers. |
 | `SOS_SMS_PER_ADDRESS_LIMIT` | `60/hour;200/day` | Twilio SOS SMS per client address (IPv6 by `/64`) for everyone sending from it, signed in or not, so many cheap accounts created on one address share one budget. Signed-in requests count here only when the Next.js server reports the address. People behind one shared address (shelter Wi-Fi, carrier NAT) share it as well. |
+| `SOS_SMS_PER_PREFIX_LIMIT` | `150/hour;600/day` | Twilio SOS SMS per IPv6 `/48` network (all its `/64` addresses together, signed in or not), so one customer rotating through the `/64` networks of its `/48` or `/56` shares one budget. Higher than the per-address budget because a `/48` can also be a carrier pool shared by many people. IPv4 callers have no wider bucket (the per-address budget applies). |
 | `SOS_SMS_ANONYMOUS_LIMIT` | `200/hour;1000/day` | Twilio SOS SMS for all anonymous callers together (counted inside the global budget), so anonymous traffic can never take more than this part of it. |
-| `SOS_SMS_GLOBAL_LIMIT` | `500/hour;3000/day` | Twilio SOS SMS for the whole server (caps the Twilio bill whatever callers do). Numbers Twilio rejects are refunded. Callers spread over many addresses can still use it up; contacts over budget get the native-SMS fallback. |
+| `SOS_SMS_NEW_CALLER_LIMIT` | `400/hour;2400/day` | Twilio SOS SMS for all new callers together: anonymous callers and email/password accounts younger than `SOS_SMS_ESTABLISHED_ACCOUNT_HOURS`. Counted inside the global budget and kept below it, so the difference (100/hour and 600/day by default) stays reserved for established accounts and freshly registered accounts, however many, cannot use the whole budget. Set it equal to `SOS_SMS_GLOBAL_LIMIT` to drop the reserve. |
+| `SOS_SMS_ESTABLISHED_ACCOUNT_HOURS` | `24` | Account age (hours since registration, 0 to 8760) from which an email/password account may use the reserved part of the global budget. OAuth sign-ins count as established (the provider vetted the account). `0` treats every signed-in caller as established. If the age lookup takes longer than 1 s, the SOS goes on with the caller treated as new. |
+| `SOS_SMS_GLOBAL_LIMIT` | `500/hour;3000/day` | Twilio SOS SMS for the whole server (caps the Twilio bill whatever callers do). Numbers Twilio rejects are refunded. Established accounts spread over many addresses can still use it up; contacts over budget get the native-SMS fallback. |
 | `SOS_SMS_REQUIRE_AUTH` | `false` | `true` sends Twilio SMS only for signed-in users; anonymous callers get the native-SMS fallback. |
 | `ALERT_POLLER_ENABLED` | `false` | Start the background GDACS poller that pushes Orange/Red alerts (needs VAPID keys). The example env files and Compose turn it on. When off, `/api/push/vapid-public-key` reports `disaster_alerts: false` and the app hides that topic. |
 | `ALERT_POLL_INTERVAL_SECONDS` | `600` | Poll interval (30 to 86400). |
@@ -313,7 +316,7 @@ below sits under `/api` on the backend. From the browser, call it through the pr
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/chat` | none | `{message (1-2000), language="en", location?: {lat, lon}}` returns `{response, agent_used, urgency_level, detected_disaster, advisory, recommended_actions[], emergency_numbers[], steps_taken[], data{}}`. |
+| POST | `/api/chat` | none | `{message (1-2000), language="en", location?: {lat, lon}}` returns `{response, agent_used, urgency_level, detected_disaster, advisory, recommended_actions[], emergency_numbers[], steps_taken[], data{}}`. Without Gemini a keyword classifier picks the built-in protocol (it recognises everyday descriptions such as "water entered my house" or "my grandmother fell"); a message it does not recognise still gets basic safety steps (call the local emergency number, move to safety, share your location) in `response` and `recommended_actions`. |
 | POST | `/api/classify` | none | `{message}` returns `{disaster_type, urgency: low/medium/high, intent}`. |
 | POST | `/api/checklist` | none | `{disaster_type, language="en"}` returns `{"checklist": [str]}`. |
 | POST | `/api/translate` | none | `{text, target_language}` returns `{"translated_text": str}`. |
@@ -377,8 +380,8 @@ Incident: `{id, created_at, updated_at, lat, lon, disaster_type, severity, descr
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/users/register` | internal | `{email, password (8-128), name (1-80)}` returns **201** `{id, email, name}`, or `409 conflict` if the email is taken. Limit: 5/minute and 20/hour per end client. |
-| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Failed attempts are limited to 5/minute and 20/hour per end client and account, 30/minute per end client and 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a successful sign-in clears that client's counter for the account. When the per-account bucket is full, clients that signed in to the account before (remembered for 30 days) still get in, and clients with fewer than 2 failures of their own may try through a small per-account overflow bucket (20/hour), so someone else's guessing does not lock the owner out, while rotating networks (an IPv6 `/48` holds 65,536 `/64`s) cannot multiply the account's budget. Every attempt, successful or not, also counts against 30/minute and 600/hour per end client (correct passwords cost a bcrypt check too), and a client may have at most 4 sign-ins in flight. `503 service_busy` when the bcrypt queue is full; a client's first 3 bcrypt jobs per minute may use 8 slots of it that busier clients cannot take. |
+| POST | `/api/users/register` | internal | `{email, password (8-128), name (1-80)}` returns **201** `{id, email, name}`, or `409 conflict` if the email is taken. Limit: 5/minute and 20/hour per end client, and 20/minute and 200/hour per IPv6 `/48` (all its `/64` clients together). |
+| POST | `/api/users/verify` | internal | `{email, password}` returns `{id, email, name}`, or one generic `401` for bad credentials. Not subject to the per-IP default limit (every call comes from the Next.js server). Failed attempts are limited to 5/minute and 20/hour per end client and account, 30/minute per end client and 100/hour per account; then `429 rate_limited`. Each attempt reserves its slot before the password check (concurrent guesses cannot slip past the limit) and gets it back when the password is correct; a successful sign-in clears that client's counter for the account. When the per-account bucket is full, clients that recently signed in to the account successfully (the last 8 per account, for 14 days; at most 50,000 accounts are remembered, the one with the oldest successful sign-in dropped first) still get in, and clients with fewer than 2 failures of their own may try through a small per-account overflow bucket (20/hour), so someone else's guessing does not lock the owner out, while rotating networks (an IPv6 `/48` holds 65,536 `/64`s) cannot multiply the account's budget. Every attempt, successful or not, also counts against 30/minute and 600/hour per end client and 120/minute and 2,400/hour per IPv6 `/48` (correct passwords cost a bcrypt check too), and successful sign-ins are capped at 30/hour per account (only someone who knows the password can use that up). A client may have at most 4 sign-ins in flight, an IPv6 `/48` at most 16. `503 service_busy` when the bcrypt queue is full; a client's first 3 bcrypt jobs per minute may use 8 slots of it that busier clients cannot take, provided its `/48` has not run more than 6 in that minute. |
 
 The browser cannot reach these through the proxy (`404`). Use the Next.js routes instead:
 `POST /api/register` and the NextAuth credentials sign-in.
@@ -730,22 +733,36 @@ Nothing below leaves the browser except through explicit API calls:
   **append** to the header directly in front of Next.js are fine as long as
   `TRUSTED_PROXY_HOPS` counts them.
 - **IPv6:** per-client limits key IPv6 callers by their `/64` network (one subscriber line or
-  host), so rotating addresses inside one's own prefix does not create fresh buckets.
+  host), so rotating addresses inside one's own prefix does not create fresh buckets. Budgets
+  that protect shared resources (sign-in attempts, registrations, the bcrypt reserve and
+  in-flight sign-ins, SOS SMS) also count each IPv6 `/48` as a whole, with higher limits,
+  because one customer often holds a `/48` or `/56` (256 to 65,536 `/64` networks). IPv4
+  callers have no wider bucket.
+- **Bounded memory:** rate-limit state lives in the backend process. Windows that have run
+  out are pruned every minute (the `limits` library keeps every key it has seen otherwise),
+  and the clients remembered for the sign-in escape hatch are capped at 8 per account and
+  50,000 accounts, so rotating networks cannot grow memory for as long as the process runs.
 - **SMS abuse:** besides the per-client `SOS_RATE_LIMIT`, Twilio messages have budgets per
   destination number, per caller (`SOS_SMS_PER_CLIENT_LIMIT`: user id, else address), per
   client address for all its users together (`SOS_SMS_PER_ADDRESS_LIMIT`, so a pile of
   accounts registered from one address shares one budget), for all anonymous callers together
   (`SOS_SMS_ANONYMOUS_LIMIT`, a part of the global budget) and per server
-  (`SOS_SMS_GLOBAL_LIMIT`). Numbers Twilio rejects (free) are refunded to the shared budgets.
-  One caller or one address therefore cannot flood a phone or use up the server's SMS budget,
-  and anonymous traffic can never take more than its pool. The global budget is a bill cap:
-  an attacker spread over many addresses can still use it up. Over budget, the SOS still
+  (`SOS_SMS_GLOBAL_LIMIT`); IPv6 callers also share a budget per `/48`
+  (`SOS_SMS_PER_PREFIX_LIMIT`). Anonymous callers and accounts younger than
+  `SOS_SMS_ESTABLISHED_ACCOUNT_HOURS` together may use only `SOS_SMS_NEW_CALLER_LIMIT`, so
+  part of the global budget stays reserved for established accounts. Numbers Twilio rejects
+  (free) are refunded to the shared budgets. One caller, one address or one `/48` therefore
+  cannot flood a phone or use up the server's SMS budget, anonymous traffic can never take
+  more than its pool, and a crowd of freshly registered accounts cannot reach the reserve.
+  The global budget is a bill cap: established accounts spread over many addresses can still
+  use it up. Over budget, the SOS still
   succeeds and the UI offers the phone's own SMS app. For a public deployment with many
   anonymous visitors consider `SOS_SMS_REQUIRE_AUTH=true`.
 - **Overload:** sign-in and registration bcrypt work runs on a bounded queue (`503
   service_busy` with `Retry-After` when full; part of it is reserved for clients that have
-  not used it in the last minute, and every sign-in counts against a per-client rate, so a
-  few clients looping a valid password cannot keep it full) and never holds a database
+  not used it in the last minute, every sign-in counts against per-client and per-`/48`
+  rates, and successful sign-ins are capped per account, so a few clients looping a valid
+  password, even from many `/64` networks, cannot keep it full) and never holds a database
   connection, and an exhausted database pool answers `503 service_busy` after 10 s instead
   of hanging. The SOS SMS fan-out has a 12 s deadline and the audit write a 3 s bound (with
   SQLite this is the 3 s busy timeout, since a cancelled statement still waits for it), so an

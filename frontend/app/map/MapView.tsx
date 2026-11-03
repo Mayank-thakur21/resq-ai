@@ -145,12 +145,15 @@ export default function MapView({ initialCenter }: MapViewProps) {
 
   // Exactly fills the viewport between the navbar (and its 1px border) and the mobile tab
   // bar, minus the offline banner while it is shown (`OFFLINE_BANNER_HEIGHT_VAR`), so the
-  // map's bottom controls and attribution stay visible.
+  // map's bottom controls and attribution stay visible. No minimum height: on a landscape
+  // phone any floor above that space pushes the map's bottom under the tab bar.
   return (
-    <div className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom)-var(--offline-banner-h))] min-h-[30rem] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px-var(--offline-banner-h))]">
-      <header className="relative z-10 flex flex-col gap-3 border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between lg:px-6">
+    <div className="flex h-[calc(100dvh-7.5rem-1px-env(safe-area-inset-bottom)-var(--offline-banner-h))] flex-col bg-slate-950 lg:h-[calc(100dvh-4rem-1px-var(--offline-banner-h))]">
+      <header className="relative z-10 flex flex-col gap-3 border-b border-white/10 bg-gradient-to-r from-slate-900 via-slate-900 to-slate-800 px-4 py-3 short:py-1.5 sm:flex-row sm:items-center sm:justify-between lg:px-6">
         <div className="min-w-0">
-          <h1 className="flex items-center gap-2 text-lg font-bold text-white sm:text-xl">
+          {/* Short viewports: the title is visually hidden (the Map tab is marked current) so the
+              map keeps its room; it remains the page heading for assistive technology. */}
+          <h1 className="flex items-center gap-2 text-lg font-bold text-white short:sr-only sm:text-xl">
             <MapIcon aria-hidden="true" className="size-5 text-blue-400" />
             Live Relief Map
           </h1>
@@ -174,7 +177,7 @@ export default function MapView({ initialCenter }: MapViewProps) {
           <Link
             // Never pre-fill the fallback location: a report must not land in the wrong city.
             href={usingDefault ? "/incidents/new" : reportIncidentHref(center)}
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-red-600 px-3 text-sm font-semibold text-white shadow-lg shadow-red-900/30 transition-colors hover:bg-red-500 focus-visible:ring-3 focus-visible:ring-red-400/60 focus-visible:outline-none"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-red-600 px-3 text-sm font-semibold text-white shadow-lg shadow-red-900/30 transition-colors hover:bg-red-500 focus-visible:ring-3 focus-visible:ring-red-400/60 focus-visible:outline-none short:h-8"
           >
             <Siren aria-hidden="true" className="size-4" />
             Report incident
@@ -184,7 +187,7 @@ export default function MapView({ initialCenter }: MapViewProps) {
             onClick={() => setPanelOpen((open) => !open)}
             aria-expanded={panelOpen}
             aria-controls="map-layers-sheet"
-            className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-600 px-3 text-sm font-semibold text-slate-100 transition-colors hover:bg-slate-800 focus-visible:ring-3 focus-visible:ring-slate-400/60 focus-visible:outline-none lg:hidden"
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-600 px-3 text-sm font-semibold text-slate-100 transition-colors hover:bg-slate-800 focus-visible:ring-3 focus-visible:ring-slate-400/60 focus-visible:outline-none short:h-8 lg:hidden"
           >
             <Layers aria-hidden="true" className="size-4" />
             Layers
@@ -250,7 +253,10 @@ export default function MapView({ initialCenter }: MapViewProps) {
 
         {/* Mobile: bottom sheet toggled from the header. */}
         {panelOpen && (
-          <div id="map-layers-sheet" className="absolute inset-x-3 top-3 bottom-20 z-[1010] overflow-y-auto overscroll-contain lg:hidden">
+          <div
+            id="map-layers-sheet"
+            className="absolute inset-x-3 top-3 bottom-20 z-[1010] overflow-y-auto overscroll-contain short:top-2 short:bottom-12 lg:hidden"
+          >
             <ErrorBoundary compact title="Layer controls are unavailable">
               <MapLayers {...panelProps} idPrefix="map-layers-mobile" onClose={() => setPanelOpen(false)} />
             </ErrorBoundary>
@@ -263,7 +269,10 @@ export default function MapView({ initialCenter }: MapViewProps) {
             onClick={recenter}
             aria-label={geo.coords ? "Recenter on my location" : "Find my location"}
             title={geo.coords ? "Recenter on my location" : "Find my location"}
-            className={cn(floatingButton, "absolute top-[84px] right-[10px] z-[1000] size-[34px]")}
+            className={cn(
+              floatingButton,
+              "absolute top-[84px] right-[10px] z-[1000] size-[34px] short:top-[10px] short:right-[54px]",
+            )}
           >
             <LocateFixed aria-hidden="true" className="size-4" />
           </button>

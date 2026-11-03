@@ -237,6 +237,8 @@ function usePublishedHeight(banner: React.RefObject<HTMLElement | null>, shown: 
  * "You're offline" banner. Rendered by the root layout between the navbar and `<main>`:
  * sticky under the navbar but part of the page flow, so while it is shown the page starts
  * below it instead of under it. Its height is published as {@link OFFLINE_BANNER_HEIGHT_VAR}.
+ * On short viewports (a phone in landscape) it is compacted, since every pixel it takes is
+ * taken from the views sized to the viewport.
  */
 export function OfflineBanner() {
   const { online } = useOnlineStatus();
@@ -248,11 +250,11 @@ export function OfflineBanner() {
     <div
       ref={bannerRef}
       data-slot="offline-banner"
-      className="sticky top-14 z-30 flex justify-center px-3 pt-2 lg:top-16 print:hidden"
+      className="sticky top-14 z-30 flex justify-center px-3 pt-2 short:pt-1 lg:top-16 print:hidden"
     >
       <div
         role="status"
-        className="flex w-full max-w-xl items-center gap-3 rounded-xl border border-amber-500/40 bg-amber-950/90 px-4 py-2.5 text-sm text-amber-100 shadow-lg shadow-black/40 backdrop-blur-md animate-in fade-in slide-in-from-top-2 motion-reduce:animate-none"
+        className="flex w-full max-w-xl items-center gap-3 rounded-xl border border-amber-500/40 bg-amber-950/90 px-4 py-2.5 text-sm text-amber-100 shadow-lg shadow-black/40 backdrop-blur-md animate-in fade-in slide-in-from-top-2 motion-reduce:animate-none short:py-1 short:text-xs"
       >
         <WifiOff aria-hidden="true" className="size-4 shrink-0 text-amber-300" />
         <p className="min-w-0 flex-1">

@@ -176,18 +176,23 @@ describe("OfflineBanner — room for views sized to the viewport (review round 4
     expect(root().getPropertyValue(OFFLINE_BANNER_HEIGHT_VAR)).toBe("");
   });
 
+  // jsdom's import.meta.url is not a file: URL; vitest runs from the frontend root.
+  const sources = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return sources(full);
+      return /\.tsx$/.test(entry.name) && !/\.test\.tsx$/.test(entry.name) ? [full] : [];
+    });
+  const appSources = () => [
+    ...sources(path.join(process.cwd(), "app")),
+    ...sources(path.join(process.cwd(), "components")),
+  ];
+  // Fixed heights (`h-[calc(100dvh…)]`, any breakpoint), not `min-h-…` (content can grow).
+  const fixedHeight = /(?<![\w-])(?:\w+:)*h-\[calc\(100dvh[^\s"'`]*\]/g;
+
   it("is subtracted by every view sized to the viewport, and defaults to 0px", () => {
-    // jsdom's import.meta.url is not a file: URL; vitest runs from the frontend root.
-    const sources = (dir: string): string[] =>
-      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) return sources(full);
-        return /\.tsx$/.test(entry.name) && !/\.test\.tsx$/.test(entry.name) ? [full] : [];
-      });
-    // Fixed heights (`h-[calc(100dvh…)]`, any breakpoint), not `min-h-…` (content can grow).
-    const fixedHeight = /(?<![\w-])(?:\w+:)*h-\[calc\(100dvh[^\s"'`]*\]/g;
     const found: string[] = [];
-    for (const file of [...sources(path.join(process.cwd(), "app")), ...sources(path.join(process.cwd(), "components"))]) {
+    for (const file of appSources()) {
       for (const [match] of readFileSync(file, "utf8").matchAll(fixedHeight)) {
         found.push(`${path.relative(process.cwd(), file)}: ${match}`);
       }
@@ -198,6 +203,29 @@ describe("OfflineBanner — room for views sized to the viewport (review round 4
 
     const css = readFileSync(path.join(process.cwd(), "app", "globals.css"), "utf8");
     expect(css).toMatch(new RegExp(`:root \\{[^}]*${OFFLINE_BANNER_HEIGHT_VAR}: 0px;`));
+  });
+
+  it("is never outweighed by a minimum height on a view sized to the viewport", () => {
+    // Regression: `/map` (and its skeleton) also had a 30rem minimum height. On a landscape
+    // phone (e.g. 844x390) the space between the navbar and the tab bar is shorter, so the
+    // minimum won and pushed the map and its attribution below the tab bar and the viewport.
+    const classLists: string[] = [];
+    for (const file of appSources()) {
+      for (const [, classes] of readFileSync(file, "utf8").matchAll(/className="([^"]*)"/g)) {
+        if (classes && classes.match(fixedHeight)) {
+          classLists.push(`${path.relative(process.cwd(), file)}: ${classes}`);
+        }
+      }
+    }
+    expect(classLists.map((entry) => entry.split(":")[0]).sort()).toEqual(
+      expect.arrayContaining([
+        path.join("app", "chat", "ChatView.tsx"),
+        path.join("app", "chat", "loading.tsx"),
+        path.join("app", "map", "MapView.tsx"),
+        path.join("app", "map", "loading.tsx"),
+      ]),
+    );
+    expect(classLists.filter((entry) => /(?<![\w-])(?:\w+:)*min-h-/.test(entry))).toEqual([]);
   });
 });
 

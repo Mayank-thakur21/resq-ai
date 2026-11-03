@@ -3,6 +3,9 @@
 @import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
+/* Short viewports, e.g. a phone in landscape (360-430px tall): views sized to the viewport
+   (/map) compact their chrome so the content keeps room between the navbar and the tab bar. */
+@custom-variant short (@media (max-height: 30rem));
 
 @theme inline {
   --color-background: var(--background);

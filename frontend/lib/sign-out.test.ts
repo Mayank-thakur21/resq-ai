@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({ signOut: vi.fn() }));
@@ -7,11 +10,13 @@ import { CHAT_HISTORY_STORAGE_KEY } from "@/app/chat/chat-helpers";
 import { INCIDENT_DRAFT_KEY } from "@/components/IncidentForm";
 import { PUSH_SYNCED_STORAGE_KEY } from "@/lib/push";
 import {
+  API_CACHE_NAME,
   CLEAR_API_CACHE_MESSAGE,
   forgetUserData,
   INCIDENT_DRAFT_STORAGE_KEY,
   signOutAndForget,
 } from "@/lib/sign-out";
+import { SOS_NAME_STORAGE_KEY, storeSosName } from "@/lib/sos-name";
 
 beforeEach(() => {
   auth.signOut.mockReset().mockResolvedValue(undefined);
@@ -93,11 +98,70 @@ describe("signOutAndForget", () => {
       throw new DOMException("blocked", "SecurityError");
     });
     try {
-      expect(() => forgetUserData()).not.toThrow();
+      await expect(forgetUserData()).resolves.toBeUndefined();
       await expect(signOutAndForget()).resolves.toBeUndefined();
       expect(auth.signOut).toHaveBeenCalledWith({ callbackUrl: "/" });
     } finally {
       removeItem.mockRestore();
     }
+  });
+});
+
+
+describe("forgetUserData (review round 3)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  });
+
+  it("deletes the API cache even when no service worker controls the page", async () => {
+    // Regression: after a hard reload (Shift+Reload) the page has no controller, so the
+    // CLEAR_API_CACHE message went nowhere and the previous user's incidents stayed cached.
+    const deleteCache = vi.fn(async () => true);
+    vi.stubGlobal("caches", { delete: deleteCache });
+    const postMessage = vi.fn();
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: { controller: null, getRegistration: async () => ({ active: { postMessage } }) },
+    });
+
+    await forgetUserData();
+
+    expect(deleteCache).toHaveBeenCalledWith(API_CACHE_NAME);
+    // The active (non-controlling) worker is still told, so in-flight responses are dropped.
+    expect(postMessage).toHaveBeenCalledWith(CLEAR_API_CACHE_MESSAGE);
+  });
+
+  it("finishes clearing before NextAuth navigates away", async () => {
+    let deleted = false;
+    vi.stubGlobal("caches", {
+      delete: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        deleted = true;
+        return true;
+      },
+    });
+    auth.signOut.mockImplementation(async () => {
+      expect(deleted).toBe(true);
+    });
+    await signOutAndForget();
+    expect(auth.signOut).toHaveBeenCalled();
+  });
+
+  it("uses the service worker's API cache name", () => {
+    // jsdom's import.meta.url is not a file: URL; vitest runs from the frontend root.
+    const source = readFileSync(path.join(process.cwd(), "public", "sw.js"), "utf8");
+    const prefix = /const CACHE_PREFIX = "([^"]+)";/.exec(source)?.[1];
+    const version = /const DATA_CACHE_VERSION = "([^"]+)";/.exec(source)?.[1];
+    expect(source).toContain("api: `${CACHE_PREFIX}api-v${DATA_CACHE_VERSION}`");
+    expect(API_CACHE_NAME).toBe(`${prefix}api-v${version}`);
+  });
+
+  it("forgets the remembered SOS sender name", async () => {
+    storeSosName("Alice Upvoter", "u-alice");
+    window.localStorage.setItem("resq_contacts", "[]");
+    await forgetUserData();
+    expect(window.localStorage.getItem(SOS_NAME_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem("resq_contacts")).toBe("[]");
   });
 });

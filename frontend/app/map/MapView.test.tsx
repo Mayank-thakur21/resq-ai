@@ -87,6 +87,10 @@ describe("MapView", () => {
     expect(screen.getByRole("link", { name: "Report incident" })).toHaveAttribute("href", "/incidents/new");
     // Desktop panel shows per-layer counts.
     expect(screen.getAllByText("1 hospitals found").length).toBeGreaterThan(0);
+    // Header counters are pluralised ("1 incidents" before).
+    expect(
+      screen.getByText((_, element) => element?.tagName === "P" && element.textContent === "4 places · 1 incident · 1 disaster"),
+    ).toBeInTheDocument();
   });
 
   it("toggles layers, remembers the choice and refetches with a new radius", async () => {

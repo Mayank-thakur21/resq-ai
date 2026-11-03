@@ -149,7 +149,9 @@ export function ChatComposer({
     "inline-flex size-11 shrink-0 items-center justify-center rounded-full border transition-colors focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50 sm:size-12";
 
   return (
-    <div className="border-t border-slate-800 bg-slate-950/90 p-3 backdrop-blur-md sm:p-4">
+    // Below lg the extra bottom padding keeps the status line clear of the tab bar's raised
+    // SOS button.
+    <div className="border-t border-slate-800 bg-slate-950/90 p-3 pb-8 backdrop-blur-md sm:p-4 sm:pb-8 lg:pb-4">
       <form
         className="mx-auto flex max-w-3xl items-end gap-2"
         onSubmit={(event) => {

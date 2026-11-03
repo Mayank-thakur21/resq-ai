@@ -723,3 +723,67 @@ describe("push notifications", () => {
     ]);
   });
 });
+
+describe("review round 3", () => {
+  it("does not store a response that was in flight when the API cache was cleared", async () => {
+    // Regression: sign-out deleted the cache, then the previous user's slow response arrived
+    // and re-created it (with upvoted_by_me: true for the next person on the device).
+    const url = `${ORIGIN}/api/backend/incidents?lat=28.6139&lon=77.209&radius_km=50&status=open`;
+    let release: (response: Response) => void = () => {};
+    worker.routes.set(url, () => new Promise<Response>((resolve) => (release = resolve)));
+    await worker.caches.open("resq-api-v2");
+
+    const inFlight = worker.fetchEvent(worker.request(url));
+    await vi.waitFor(() => expect(worker.fetchLog).toContain(url));
+    await worker.dispatch("message", { data: { type: "CLEAR_API_CACHE" } });
+    release(json({ incidents: [{ id: "x", upvoted_by_me: true }] }));
+    const { response } = await inFlight;
+
+    expect(response?.status).toBe(200); // the page still gets its answer
+    expect(worker.caches.urls("resq-api-")).toEqual([]);
+
+    // Responses fetched after the clear are cached again.
+    worker.routes.set(url, () => json({ incidents: [] }));
+    await worker.fetchEvent(worker.request(url));
+    expect(worker.caches.urls("resq-api-")).toEqual([url]);
+  });
+
+  it("removes a write that was under way when the cache was cleared", async () => {
+    const url = `${ORIGIN}/api/backend/weather?lat=1&lon=2`;
+    worker.routes.set(url, () => json({ temp: 20 }));
+    const cache = await worker.caches.open("resq-api-v2");
+    const realPut = cache.put.bind(cache);
+    // The clear lands while the worker is writing the response.
+    cache.put = async (input: unknown, response: Response) => {
+      await realPut(input, response);
+      await worker.dispatch("message", { data: { type: "CLEAR_API_CACHE" } });
+      await (await worker.caches.open("resq-api-v2")).put(input, response);
+    };
+    await worker.fetchEvent(worker.request(url));
+    expect(worker.caches.urls("resq-api-")).toEqual([]);
+  });
+
+  it("falls back to the offline page for an incident link with broken percent-encoding", async () => {
+    // Regression: decodeURIComponent threw inside the offline handler -> browser error page.
+    servePrecache(worker);
+    worker.routes.set(`${ORIGIN}/incidents`, () => html("incidents shell"));
+    await worker.dispatch("install");
+    worker.routes.clear();
+
+    const { response } = await worker.fetchEvent(worker.request("/incidents/%E0%A4%A", { navigate: true }));
+    expect(response?.status).toBe(302);
+    expect(response?.headers.get("location")).toBe(`${ORIGIN}/offline?from=%2Fincidents%2F%25E0%25A4%25A`);
+  });
+
+  it("falls back to the offline page when a 5xx answer meets broken percent-encoding", async () => {
+    servePrecache(worker);
+    worker.routes.set(`${ORIGIN}/incidents`, () => html("incidents shell"));
+    await worker.dispatch("install");
+    worker.routes.clear();
+    worker.routes.set(`${ORIGIN}/incidents/%E0%A4%A`, () => new Response("bad gateway", { status: 502 }));
+
+    const { response } = await worker.fetchEvent(worker.request("/incidents/%E0%A4%A", { navigate: true }));
+    expect(response?.status).toBe(302);
+    expect(response?.headers.get("location")).toContain("/offline?from=");
+  });
+});

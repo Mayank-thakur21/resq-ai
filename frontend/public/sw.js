@@ -35,7 +35,9 @@
  *   requests and /sw.js itself — they always go straight to the network.
  *
  * Messages: {type: "SKIP_WAITING"} activates a waiting update (sent by the "Reload" toast);
- * {type: "CLEAR_API_CACHE"} drops cached API data (e.g. on sign-out).
+ * {type: "CLEAR_API_CACHE"} drops cached API data (e.g. on sign-out). It also bumps an API
+ * cache generation: a response that was still in flight (fetched with the previous user's
+ * session) is not written into the cache once it arrives.
  *
  * Push: shows the backend's payload {title, body, url, tag, severity}; clicking focuses an
  * open ResQ AI window (navigating it to the url) or opens a new one.
@@ -113,6 +115,9 @@ const PUSH_BADGE = "/icons/badge-72.png";
 const PUSH_SEVERITIES = ["low", "medium", "high"];
 
 const TIMEOUT = Symbol("timeout");
+
+/** Bumped by CLEAR_API_CACHE; API responses fetched under an older generation are not stored. */
+let apiCacheGeneration = 0;
 
 /** Shown when even the precached /offline page is missing. */
 const OFFLINE_FALLBACK_HTML = `<!doctype html>
@@ -245,6 +250,15 @@ function safeAppPath(value) {
   }
 }
 
+/** `decodeURIComponent` that returns `null` for malformed input (e.g. "%E0%A4%A"). */
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 function clip(value, max) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
@@ -359,6 +373,7 @@ self.addEventListener("message", (event) => {
   if (type === "SKIP_WAITING") {
     self.skipWaiting();
   } else if (type === "CLEAR_API_CACHE") {
+    apiCacheGeneration += 1;
     extendLifetime(event, caches.delete(CACHE_NAMES.api));
   }
 });
@@ -392,11 +407,12 @@ async function offlineNavigationResponse(request) {
   // An unvisited incident report: open the warmed incidents list focused on it, which can
   // show it from the saved incidents data.
   const detail = INCIDENT_DETAIL_PATTERN.exec(url.pathname);
-  if (detail && detail[1] !== "new") {
+  const focus = detail && detail[1] !== "new" ? safeDecode(detail[1]) : null;
+  if (focus) {
     const critical = await caches.open(CACHE_NAMES.critical);
     if (await critical.match("/incidents", { ignoreVary: true })) {
       const target = new URL("/incidents", self.location.origin);
-      target.searchParams.set("focus", decodeURIComponent(detail[1]).slice(0, 64));
+      target.searchParams.set("focus", focus.slice(0, 64));
       return Response.redirect(target.href, 302);
     }
   }
@@ -442,13 +458,14 @@ async function handleNavigation(event) {
   );
 
   try {
+    // `return await` keeps failures of the 5xx fallback inside this try block.
     const winner = await Promise.race([network, sleep(NAVIGATION_TIMEOUT_MS)]);
-    if (winner !== TIMEOUT) return isServerError(winner) ? serverErrorNavigation(request, winner) : winner;
+    if (winner !== TIMEOUT) return isServerError(winner) ? await serverErrorNavigation(request, winner) : winner;
     // Slow network: use the saved copy if we have one, otherwise keep waiting.
     const cached = await cachedPage(request);
     if (cached) return cached;
     const late = await network;
-    return isServerError(late) ? serverErrorNavigation(request, late) : late;
+    return isServerError(late) ? await serverErrorNavigation(request, late) : late;
   } catch (error) {
     log("info", `navigation offline: ${new URL(request.url).pathname}`, error && error.message);
     return (await cachedPage(request)) || offlineNavigationResponse(request);
@@ -571,6 +588,7 @@ function isServerError(response) {
  */
 async function handleApi(event) {
   const { request } = event;
+  const generation = apiCacheGeneration;
   const network = fetch(request);
 
   extendLifetime(
@@ -579,7 +597,14 @@ async function handleApi(event) {
       if (!isUsableResponse(response)) return;
       const copy = response.clone();
       const stamped = await withHeaders(copy, { "X-ResQ-Cached-At": new Date().toISOString() });
+      // Signed out while this was in flight: it carries the previous session's data.
+      if (generation !== apiCacheGeneration) return;
       await putInCache(CACHE_NAMES.api, request, stamped, CACHE_LIMITS.api);
+      if (generation !== apiCacheGeneration) {
+        // Cleared while the write was under way: undo it.
+        const cache = await caches.open(CACHE_NAMES.api);
+        await cache.delete(request);
+      }
     }),
   );
 

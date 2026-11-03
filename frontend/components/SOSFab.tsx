@@ -10,19 +10,15 @@ import { cn } from "@/lib/utils";
  * Floating red SOS button (rendered once by the root layout) linking to `/sos`.
  *
  * - Hidden on `/sos` itself (and its sub-routes).
- * - Hidden below `lg` on `/chat` and `/map`: on `/chat` the message composer sits at the
- *   bottom-right; on `/map` the button would cover the OpenStreetMap attribution (which the
- *   tile policy requires to stay visible). The mobile tab bar already has a prominent SOS
- *   button right below in both cases.
- * - Placed above the mobile bottom tab bar (`h-16` + safe-area inset) and under the navbar
- *   layer (`z-30` < `z-40`), so the navbar's "More" sheet and dialogs cover it.
+ * - Large screens (`lg`) only: below `lg` the bottom tab bar already has a prominent raised
+ *   SOS button on every page, and a second floating one covered page content (card
+ *   buttons, text, the map's OpenStreetMap attribution, the chat composer).
+ * - Under the navbar layer (`z-30` < `z-40`), so the navbar's menus and dialogs cover it.
  * - The attention pulse uses `motion-safe:` so it is off for `prefers-reduced-motion`.
  */
 
 /** Routes (and their children) where the FAB is never shown. */
 const HIDDEN_ROUTES = ["/sos"];
-/** Routes where the FAB is shown on large screens only. */
-const DESKTOP_ONLY_ROUTES = ["/chat", "/map"];
 
 function matches(pathname: string | null, routes: readonly string[]): boolean {
   if (!pathname) return false;
@@ -37,7 +33,6 @@ export function isSOSFabVisible(pathname: string | null): boolean {
 export default function SOSFab() {
   const pathname = usePathname();
   if (!isSOSFabVisible(pathname)) return null;
-  const desktopOnly = matches(pathname, DESKTOP_ONLY_ROUTES);
 
   return (
     <Link
@@ -46,12 +41,11 @@ export default function SOSFab() {
       title="Emergency SOS"
       data-slot="sos-fab"
       className={cn(
-        "group fixed right-4 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-30 items-center justify-center rounded-full lg:right-6 lg:bottom-6",
+        "group fixed right-6 bottom-6 z-30 hidden items-center justify-center rounded-full lg:flex",
         "size-14 bg-gradient-to-br from-red-500 to-red-700 text-white shadow-xl shadow-red-900/50 ring-2 ring-red-300/30",
         "transition-transform duration-150 hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100",
         "focus-visible:ring-4 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 focus-visible:outline-none",
         "print:hidden",
-        desktopOnly ? "hidden lg:flex" : "flex",
       )}
     >
       <span

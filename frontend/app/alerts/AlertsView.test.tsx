@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const navigation = vi.hoisted(() => ({ search: "" }));
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(navigation.search),
+  usePathname: () => "/alerts",
 }));
 
 import AlertsView, { parseTab } from "@/app/alerts/AlertsView";

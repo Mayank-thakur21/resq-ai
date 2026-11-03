@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import PwaRegister, { isServiceWorkerEnabled, SERVICE_WORKER_URL } from "@/components/PwaRegister";
+import PwaRegister, { isServiceWorkerEnabled, OfflineBanner, SERVICE_WORKER_URL } from "@/components/PwaRegister";
 
 class FakeWorker extends EventTarget {
   state = "installed";
@@ -57,7 +57,12 @@ describe("PwaRegister — connectivity", () => {
   });
 
   it("shows an offline banner and a short 'back online' note", async () => {
-    render(<PwaRegister />);
+    render(
+      <>
+        <OfflineBanner />
+        <PwaRegister />
+      </>,
+    );
     act(() => {
       setOnline(false);
       window.dispatchEvent(new Event("offline"));
@@ -75,8 +80,25 @@ describe("PwaRegister — connectivity", () => {
 
   it("starts in the offline state when the browser already is offline", () => {
     setOnline(false);
-    render(<PwaRegister />);
+    render(<OfflineBanner />);
     expect(screen.getByText(/You're offline\./)).toBeInTheDocument();
+  });
+
+  it("keeps the offline banner in the page flow instead of over the page", () => {
+    // Regression: a fixed overlay hid the first ~80 px of every page while offline (e.g. the
+    // /offline page's icon).
+    setOnline(false);
+    const { container } = render(
+      <>
+        <OfflineBanner />
+        <PwaRegister />
+      </>,
+    );
+    const banner = container.querySelector('[data-slot="offline-banner"]');
+    expect(banner?.className.split(/\s+/)).toEqual(expect.arrayContaining(["sticky", "top-14"]));
+    expect(banner?.className.split(/\s+/)).not.toContain("fixed");
+    // The fixed status area (update / back online toasts) has nothing to show.
+    expect(container.querySelector('[data-slot="pwa-status"]')).toBeNull();
   });
 });
 

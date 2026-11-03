@@ -11,6 +11,9 @@ const push = vi.hoisted(() => ({
   resyncSubscription: vi.fn(),
 }));
 
+const navigation = vi.hoisted(() => ({ pathname: "/profile" }));
+vi.mock("next/navigation", () => ({ usePathname: () => navigation.pathname }));
+
 // Keep the real constants / PushError; replace only the functions touching browser APIs.
 vi.mock("@/lib/push", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/push")>();
@@ -106,6 +109,19 @@ describe("PushToggle", () => {
     renderWithSWR(<PushToggle />);
     expect(await screen.findByText("Notifications aren't available yet")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Alerts page" })).toHaveAttribute("href", "/alerts");
+  });
+
+  it("does not send people on the Alerts page to the Alerts page", async () => {
+    vapid = { enabled: false, public_key: null };
+    navigation.pathname = "/alerts";
+    try {
+      renderWithSWR(<PushToggle />);
+      expect(await screen.findByText(/New alerts still appear on this page/)).toBeInTheDocument();
+      expect(screen.queryByText(/Check the/)).not.toBeInTheDocument();
+    } finally {
+      navigation.pathname = "/profile";
+    }
   });
 
   it("explains blocked notifications", async () => {

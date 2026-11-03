@@ -25,35 +25,19 @@ import { getErrorMessage, isApiError, sendSOS, swrKeys } from "@/lib/api";
 import { type SosRecipient, toSosRecipients, useContacts } from "@/lib/contacts";
 import { pluralize } from "@/lib/format";
 import { useGeolocation } from "@/lib/geo";
+import { identityTag } from "@/lib/identity";
 import { buildSmsUri } from "@/lib/phone";
+import { readSosName, SOS_NAME_STORAGE_KEY, storeSosName } from "@/lib/sos-name";
 import type { SOSRequest, SOSResponse } from "@/lib/types";
 
-/** Sender name remembered on this device between SOS uses. */
-export const SOS_NAME_STORAGE_KEY = "resq_sos_name";
+/** Sender name remembered on this device between SOS uses (see `lib/sos-name.ts`). */
+export { SOS_NAME_STORAGE_KEY };
 
 type Phase =
   | { kind: "idle" }
   | { kind: "sending"; request: SOSRequest; recipients: SosRecipient[] }
   | { kind: "sent"; request: SOSRequest; recipients: SosRecipient[]; response: SOSResponse }
   | { kind: "failed"; request: SOSRequest; recipients: SosRecipient[]; error: unknown; offline: boolean };
-
-function readStoredName(): string {
-  try {
-    return window.localStorage.getItem(SOS_NAME_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function storeName(name: string): void {
-  try {
-    const clean = name.trim();
-    if (clean) window.localStorage.setItem(SOS_NAME_STORAGE_KEY, clean);
-    else window.localStorage.removeItem(SOS_NAME_STORAGE_KEY);
-  } catch {
-    // Storage unavailable: the name simply isn't remembered.
-  }
-}
 
 /**
  * The `/sos` experience: press-and-hold to send the live location to selected contacts,
@@ -101,13 +85,15 @@ export default function SOSView() {
     setSelected((previous) => previous.filter((number) => textable.includes(number)));
   }, [contactsReady, recipients]);
 
-  // Prefill the sender name (remembered name first, then the account name).
+  // Prefill the sender name once the session is known: the name this identity used last
+  // time, else the account name. A name remembered for another account (or for anonymous
+  // use) is never offered, so Bob's SOS cannot go out as "SOS from Alice".
   const sessionName = session?.user?.name ?? "";
+  const owner = identityTag(session?.user?.id);
   React.useEffect(() => {
-    if (nameTouched.current) return;
-    const value = readStoredName() || sessionName;
-    if (value) setName(value);
-  }, [sessionName]);
+    if (nameTouched.current || sessionStatus === "loading") return;
+    setName(readSosName(owner) || sessionName);
+  }, [owner, sessionName, sessionStatus]);
 
   const toggleContact = React.useCallback((e164: string) => {
     setSelected((previous) => {
@@ -126,7 +112,7 @@ export default function SOSView() {
       numbers: chosen.map((recipient) => recipient.e164 as string),
       userName: name,
     });
-    storeName(name);
+    storeSosName(name, owner);
 
     // Known offline: don't wait for a timeout — go straight to the phone's own tools.
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -151,7 +137,7 @@ export default function SOSView() {
       const offline = isApiError(error) && error.isNetworkError && navigator.onLine === false;
       setPhase({ kind: "failed", request, recipients: chosen, error, offline });
     }
-  }, [location, message, mutate, name, recipients, selected]);
+  }, [location, message, mutate, name, owner, recipients, selected]);
 
   const reset = () => setPhase({ kind: "idle" });
 

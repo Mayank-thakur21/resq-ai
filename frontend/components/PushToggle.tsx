@@ -1,6 +1,8 @@
 "use client";
 
 import { Bell, BellOff, BellRing, LocateFixed, Smartphone } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { SessionContext } from "next-auth/react";
 import * as React from "react";
 import useSWR from "swr";
@@ -146,6 +148,7 @@ export function PushToggle({ coords, className }: PushToggleProps) {
   );
   const { mutate: refreshVapid } = vapid;
   const serverEnabled = !!vapid.data?.enabled && !!vapid.data.public_key;
+  const onAlertsPage = usePathname() === "/alerts";
   // Older backends do not report it: assume disaster alerts are available.
   const disastersAvailable = vapid.data?.disaster_alerts !== false;
   const offeredTopics = React.useMemo<readonly PushTopic[]>(
@@ -371,7 +374,18 @@ export function PushToggle({ coords, className }: PushToggleProps) {
         <Alert variant="info">
           <AlertTitle>Notifications aren&apos;t available yet</AlertTitle>
           <AlertDescription>
-            Push notifications aren&apos;t set up on this server. Check the Alerts page for the latest events.
+            Push notifications aren&apos;t set up on this server.{" "}
+            {onAlertsPage ? (
+              "New alerts still appear on this page."
+            ) : (
+              <>
+                Check the{" "}
+                <Link href="/alerts" className="font-semibold underline underline-offset-2">
+                  Alerts page
+                </Link>{" "}
+                for the latest events.
+              </>
+            )}
           </AlertDescription>
         </Alert>
         {isOn && (

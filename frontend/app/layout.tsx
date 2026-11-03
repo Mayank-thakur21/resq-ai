@@ -7,7 +7,7 @@ import Footer from "@/components/Footer";
 import InstallPrompt from "@/components/InstallPrompt";
 import Navbar from "@/components/Navbar";
 import Providers from "@/components/Providers";
-import PwaRegister from "@/components/PwaRegister";
+import PwaRegister, { OfflineBanner } from "@/components/PwaRegister";
 import SOSFab from "@/components/SOSFab";
 
 const inter = Inter({ subsets: ["latin"], display: "swap", variable: "--font-inter" });
@@ -84,6 +84,7 @@ export default function RootLayout({
         </a>
         <Providers>
           <Navbar />
+          <OfflineBanner />
           <main id="main" tabIndex={-1} className="flex-grow focus:outline-none">
             {children}
           </main>

@@ -10,6 +10,9 @@ vi.mock("next-auth/react", () => ({ useSession: () => ({ data: auth.session, sta
 
 import SOSView, { SOS_NAME_STORAGE_KEY } from "@/app/sos/SOSView";
 import { CONTACTS_STORAGE_KEY, resetContactsMemoryForTests } from "@/lib/contacts";
+import { identityTag } from "@/lib/identity";
+import { forgetUserData } from "@/lib/sign-out";
+import { readSosName } from "@/lib/sos-name";
 
 type Geo = "ok" | "denied";
 
@@ -120,7 +123,7 @@ describe("SOSView", () => {
     });
     expect(screen.getByRole("link", { name: /open sms app/i })).toHaveAttribute("href", SOS_RESPONSE.fallback_sms_uri);
     expect(screen.getByRole("link", { name: /call 112/i })).toHaveAttribute("href", "tel:112");
-    expect(window.localStorage.getItem(SOS_NAME_STORAGE_KEY)).toBe("Asha");
+    expect(readSosName("")).toBe("Asha"); // remembered for anonymous use on this device
   });
 
   it("shows per-contact delivery results when texts were sent", async () => {
@@ -161,7 +164,9 @@ describe("SOSView", () => {
     expect(body).toContain("https://maps.google.com/?q=28.613900,77.209000");
     expect(consoleWarn).toHaveBeenCalledWith("[sos] request failed", expect.anything());
 
-    fetchMock.mockResolvedValue(jsonResponse({ ...SOS_RESPONSE, sms: { configured: false, sent: [], failed: [] } }));
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ ...SOS_RESPONSE, sms: { configured: false, sent: [], failed: [] } }),
+    );
     fireEvent.click(screen.getByRole("button", { name: /try sending again/i }));
     expect(await screen.findByRole("heading", { name: /sos saved/i })).toBeInTheDocument();
   });
@@ -192,5 +197,91 @@ describe("SOSView", () => {
     renderView();
     await waitFor(() => expect(screen.getByLabelText(/your name/i)).toHaveValue("Ravi Kumar"));
     expect(screen.getByText(/saved to your profile history/i)).toBeInTheDocument();
+  });
+});
+
+
+describe("SOSView sender name (review round 3)", () => {
+  function sentBody(call = 0) {
+    const [, init] = fetchMock.mock.calls[call] as [string, RequestInit];
+    return JSON.parse(String(init.body)) as { user_name?: string };
+  }
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ ...SOS_RESPONSE, sms: { configured: false, sent: [], failed: [] } }),
+    );
+  });
+
+  it("never sends the previous account's name for the next signed-in user", async () => {
+    // Regression: Alice's prefilled name was stored, survived sign-out and won over Bob's
+    // session name, so Bob's SOS went out as "SOS from Alice Upvoter".
+    auth.session = { user: { id: "alice", name: "Alice Upvoter" } };
+    auth.status = "authenticated";
+    renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("Alice Upvoter");
+    await sendViaTwoStep();
+    await screen.findByRole("heading", { name: /sos saved/i });
+    expect(sentBody().user_name).toBe("Alice Upvoter");
+    cleanup();
+
+    await forgetUserData(); // Alice signs out
+    expect(window.localStorage.getItem(SOS_NAME_STORAGE_KEY)).toBeNull();
+
+    auth.session = { user: { id: "bob", name: "Bob Reporter" } };
+    renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("Bob Reporter");
+    await sendViaTwoStep();
+    await screen.findByRole("heading", { name: /sos saved/i });
+    expect(sentBody(1).user_name).toBe("Bob Reporter");
+  });
+
+  it("ignores a name remembered for another identity, even without a sign-out", async () => {
+    window.localStorage.setItem(
+      SOS_NAME_STORAGE_KEY,
+      JSON.stringify({ name: "Alice Upvoter", owner: identityTag("alice") }),
+    );
+    // Bob's session arrives late (loading first): the name must not flash Alice's either.
+    auth.session = null;
+    auth.status = "loading";
+    const view = renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("");
+    auth.session = { user: { id: "bob", name: "Bob Reporter" } };
+    auth.status = "authenticated";
+    view.rerender(
+      <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
+        <SOSView />
+      </SWRConfig>,
+    );
+    await waitFor(() => expect(screen.getByLabelText(/your name/i)).toHaveValue("Bob Reporter"));
+    cleanup();
+
+    // An anonymous visitor (e.g. after Alice's session expired) does not get it either.
+    auth.session = null;
+    auth.status = "unauthenticated";
+    renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("");
+  });
+
+  it("keeps a name the same account chose, and ignores old plain-text values", async () => {
+    auth.session = { user: { id: "bob", name: "Bob Reporter" } };
+    auth.status = "authenticated";
+    window.localStorage.setItem(
+      SOS_NAME_STORAGE_KEY,
+      JSON.stringify({ name: "Bob R. (blue house)", owner: identityTag("bob") }),
+    );
+    renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("Bob R. (blue house)");
+    cleanup();
+
+    window.localStorage.setItem(SOS_NAME_STORAGE_KEY, "Alice Upvoter"); // pre-upgrade format
+    renderView();
+    await screen.findByText("Location found");
+    expect(screen.getByLabelText(/your name/i)).toHaveValue("Bob Reporter");
   });
 });

@@ -5,6 +5,7 @@ import { SessionProvider } from "next-auth/react";
 import * as React from "react";
 import { SWRConfig, type SWRConfiguration } from "swr";
 
+import { SessionDataGuard } from "@/components/SessionDataGuard";
 import { compareApiData, fetcher, isApiError } from "@/lib/api";
 
 /**
@@ -46,10 +47,14 @@ export interface ProvidersProps {
   session?: Session | null;
 }
 
-/** App-wide client providers: NextAuth session context + SWR defaults. */
+/**
+ * App-wide client providers: NextAuth session context + SWR defaults, and the guard that
+ * forgets a previous account's cached data when someone else signs in on this device.
+ */
 export default function Providers({ children, session }: ProvidersProps) {
   return (
     <SessionProvider session={session} refetchOnWindowFocus refetchInterval={5 * 60}>
+      <SessionDataGuard />
       <SWRConfig value={swrConfig}>{children}</SWRConfig>
     </SessionProvider>
   );

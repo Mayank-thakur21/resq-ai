@@ -17,8 +17,10 @@ import { cn } from "@/lib/utils";
  *    worker is unregistered so stale caches can't mask code changes.
  * 2. Shows an "Update available — Reload" toast when a new worker is waiting. Reload posts
  *    `{type: "SKIP_WAITING"}` to it and reloads once it takes control.
- * 3. Shows a "You're offline" banner (and a short "Back online" note) from the browser's
- *    online/offline events.
+ * 3. Shows a short "Back online" note from the browser's online/offline events. The
+ *    "You're offline" banner itself is {@link OfflineBanner}, rendered by the layout right
+ *    under the navbar *in the page flow*, so it pushes the page down instead of covering
+ *    its first lines (as a fixed overlay did).
  *
  * Everything is best-effort: registration failures are logged, never shown as errors.
  */
@@ -194,36 +196,52 @@ function useServiceWorker(): { waiting: ServiceWorker | null; applyUpdate: () =>
   return { waiting, applyUpdate, dismiss };
 }
 
+/**
+ * "You're offline" banner. Rendered by the root layout between the navbar and `<main>`:
+ * sticky under the navbar but part of the page flow, so while it is shown the page starts
+ * below it instead of under it.
+ */
+export function OfflineBanner() {
+  const { online } = useOnlineStatus();
+  if (online) return null;
+
+  return (
+    <div
+      data-slot="offline-banner"
+      className="sticky top-14 z-30 flex justify-center px-3 pt-2 lg:top-16 print:hidden"
+    >
+      <div
+        role="status"
+        className="flex w-full max-w-xl items-center gap-3 rounded-xl border border-amber-500/40 bg-amber-950/90 px-4 py-2.5 text-sm text-amber-100 shadow-lg shadow-black/40 backdrop-blur-md animate-in fade-in slide-in-from-top-2 motion-reduce:animate-none"
+      >
+        <WifiOff aria-hidden="true" className="size-4 shrink-0 text-amber-300" />
+        <p className="min-w-0 flex-1">
+          <span className="font-semibold">You&apos;re offline.</span> Saved contacts and emergency numbers still
+          work.
+        </p>
+        <Link
+          href="/offline"
+          className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-amber-200 underline underline-offset-2 hover:text-white focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:outline-none"
+        >
+          Offline help
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export default function PwaRegister() {
   const { online, backOnline } = useOnlineStatus();
   const { waiting, applyUpdate, dismiss } = useServiceWorker();
   const [applying, setApplying] = React.useState(false);
 
-  if (online && !backOnline && !waiting) return null;
+  if (!(online && backOnline) && !waiting) return null;
 
   return (
     <div
       data-slot="pwa-status"
       className="pointer-events-none fixed inset-x-0 top-14 z-30 flex flex-col items-center gap-2 px-3 pt-2 lg:top-16 print:hidden"
     >
-      {!online && (
-        <div
-          role="status"
-          className="pointer-events-auto flex w-full max-w-xl items-center gap-3 rounded-xl border border-amber-500/40 bg-amber-950/90 px-4 py-2.5 text-sm text-amber-100 shadow-lg shadow-black/40 backdrop-blur-md animate-in fade-in slide-in-from-top-2 motion-reduce:animate-none"
-        >
-          <WifiOff aria-hidden="true" className="size-4 shrink-0 text-amber-300" />
-          <p className="min-w-0 flex-1">
-            <span className="font-semibold">You&apos;re offline.</span> Saved contacts and emergency numbers
-            still work.
-          </p>
-          <Link
-            href="/offline"
-            className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-amber-200 underline underline-offset-2 hover:text-white focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:outline-none"
-          >
-            Offline help
-          </Link>
-        </div>
-      )}
       {online && backOnline && (
         <div
           role="status"

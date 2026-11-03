@@ -11,14 +11,19 @@ beforeEach(() => {
 });
 
 describe("SOSFab", () => {
-  it("links to /sos from regular pages", () => {
-    navigation.pathname = "/alerts";
-    render(<SOSFab />);
-    const link = screen.getByRole("link", { name: /sos — send an emergency alert/i });
-    expect(link).toHaveAttribute("href", "/sos");
-    const classes = link.className.split(/\s+/);
-    expect(classes).toContain("flex");
-    expect(classes).not.toContain("hidden");
+  it("links to /sos from regular pages, on large screens only", () => {
+    // Regression: below lg it duplicated the tab bar's SOS button and covered card buttons
+    // and text (e.g. the first incident's "Details").
+    for (const pathname of ["/", "/alerts", "/incidents", "/offline"]) {
+      navigation.pathname = pathname;
+      const { unmount } = render(<SOSFab />);
+      const link = screen.getByRole("link", { name: /sos — send an emergency alert/i });
+      expect(link).toHaveAttribute("href", "/sos");
+      const classes = link.className.split(/\s+/);
+      expect(classes).toEqual(expect.arrayContaining(["hidden", "lg:flex"]));
+      expect(classes).not.toContain("flex");
+      unmount();
+    }
   });
 
   it("is not rendered on the SOS page itself", () => {

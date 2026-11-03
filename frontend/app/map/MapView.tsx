@@ -36,7 +36,7 @@ import {
 import { MapPlaceholder } from "@/components/map/MapPlaceholder";
 import { layerData, layerResponses, toLayerStatusViews, useMapData } from "@/components/map/useMapData";
 import { OfflineDataNotice } from "@/components/OfflineDataNotice";
-import { formatCoordinates } from "@/lib/format";
+import { formatCoordinates, pluralize } from "@/lib/format";
 import type { GeolocationStatus } from "@/lib/geo";
 import type { LatLon } from "@/lib/types";
 import { PLACE_TYPES } from "@/lib/types";
@@ -164,8 +164,8 @@ export default function MapView({ initialCenter }: MapViewProps) {
         <div className="flex shrink-0 items-center gap-2">
           {ready && (
             <p className="hidden text-xs text-slate-400 xl:block" aria-live="polite">
-              {placeCount} places · {data.incidents.items.length} incidents · {data.disasters.items.length}{" "}
-              disasters
+              {pluralize(placeCount, "place")} · {pluralize(data.incidents.items.length, "incident")} ·{" "}
+              {pluralize(data.disasters.items.length, "disaster")}
             </p>
           )}
           <Link
@@ -190,7 +190,10 @@ export default function MapView({ initialCenter }: MapViewProps) {
         </div>
       </header>
 
-      <div className="relative isolate min-h-0 flex-1 bg-slate-900">
+      {/* Below lg the tab bar's raised SOS button overlaps the map's bottom edge: keep
+          Leaflet's bottom controls (the attribution the OSM tile policy requires) above it.
+          `!` because leaflet.css is unlayered and would beat a layered utility. */}
+      <div className="relative isolate min-h-0 flex-1 bg-slate-900 max-lg:[&_.leaflet-bottom]:bottom-6!">
         {ready ? (
           <ErrorBoundary
             resetKeys={[viewToken]}

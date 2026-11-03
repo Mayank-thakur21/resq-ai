@@ -23,6 +23,7 @@ from app.agents.router_agent import (
     DEFAULT_EMERGENCY_NUMBERS,
     GENERIC_RESPONSE,
     extract_recommended_actions,
+    generic_safety_steps,
     get_emergency_numbers,
     keyword_classify,
     normalize_intent,
@@ -205,10 +206,13 @@ def test_chat_without_llm_flood_emergency(
 def test_chat_generic_message(client: TestClient, places: FakePlaces, weather: FakeWeather) -> None:
     body = chat(client, "hello there", location=DELHI)
 
-    assert body["response"] == GENERIC_RESPONSE
+    # Nothing recognised: "tell me more" plus the basic safety steps (also as actions).
+    assert body["response"].startswith(GENERIC_RESPONSE)
     assert body["urgency_level"] == "low"
     assert body["detected_disaster"] == "unknown"
-    assert body["recommended_actions"] == []
+    assert body["recommended_actions"] == generic_safety_steps("112")
+    assert body["recommended_actions"][0].startswith("Call 112")
+    assert all(action in body["response"] for action in body["recommended_actions"])
     assert body["advisory"] is None
     assert body["data"] == {}
     assert body["emergency_numbers"] == list(DEFAULT_EMERGENCY_NUMBERS)
@@ -220,6 +224,20 @@ def test_chat_generic_message(client: TestClient, places: FakePlaces, weather: F
     ]
     assert places.calls == []
     assert weather.calls == []
+
+
+def test_chat_nearby_places_only_still_lists_basic_steps(
+    client: TestClient, places: FakePlaces
+) -> None:
+    """Regression: an answer with nearby places but no protocol had no actions at all."""
+    body = chat(client, "Where is the nearest hospital?", location=DELHI)
+
+    assert body["detected_disaster"] == "unknown"
+    assert "near you" in body["response"]
+    assert not body["response"].startswith(GENERIC_RESPONSE)  # the places are the answer
+    assert body["recommended_actions"] == generic_safety_steps("112")
+    assert body["recommended_actions"][0].startswith("Call 112")
+    assert "hospitals" in body["data"]
 
 
 def test_chat_preparedness_question_runs_checklist(client: TestClient, places: FakePlaces) -> None:

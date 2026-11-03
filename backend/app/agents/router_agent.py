@@ -46,6 +46,7 @@ from app.agents.safety_agent import (
     GENERAL,
     UNKNOWN,
     disaster_label,
+    format_bullets,
     get_safety_instructions,
     normalize_disaster_type,
 )
@@ -68,6 +69,9 @@ GENERIC_RESPONSE = (
     "I'm here to help with emergency situations. Could you provide more details about what "
     "you need or what is happening?"
 )
+#: Heading of the basic safety steps that follow :data:`GENERIC_RESPONSE`.
+GENERIC_STEPS_HEADING = "If you or someone near you is in danger right now:"
+
 #: Total time budget of one chat answer (the frontend proxy gives up after 20 s).
 CHAT_TIME_BUDGET_SECONDS = 15.0
 #: Upper bound for the classification stage.
@@ -197,6 +201,68 @@ def _compile(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
 
 
+# Fragments shared by several patterns below. The keyword classifier only has to be good
+# enough to pick the right built-in protocol when no LLM is configured, so it errs towards
+# over-triage, but common everyday sentences ("my phone fell", "help desk") must not alarm.
+
+#: People someone writes about ("my grandmother", "a child", bare "grandpa").
+_RELATIVE = (
+    r"(?:mother|mom|mum|mommy|mummy|father|dad|daddy|parents?|"
+    r"grand(?:mother|father|ma|pa|mum|dad|parents?|son|daughter|child(?:ren)?)|granny|nana|"
+    r"son|daughter|baby|child|children|kids?|husband|wife|brother|sister|friend|uncle|"
+    r"aunt(?:y|ie)?|cousin|nephew|niece|neighbou?r|partner|boy|girl|man|woman|lady|person|"
+    r"patient|(?:elderly|old) (?:man|woman|lady|person))"
+)
+#: A person (not a thing) as the subject: "I", "we", "someone", "my son", "a man", "grandpa".
+#: Lets "fell" / "stuck" count only for people ("my phone fell" is not an emergency).
+_PERSON = (
+    r"(?:\b(?:i|i'm|im|i've|we|we're|we've|he|she|he's|she's|they|they're|they've|"
+    r"someone|somebody|everyone|people)"
+    rf"|\b(?:my|our|his|her|their|a|an|the|this|that) {_RELATIVE}|\b{_RELATIVE})"
+)
+#: Water (or a river, the sea) as the subject of a sentence: "rain water", "rainwater",
+#: "flood waters", "the river".
+_WATER = (
+    r"(?:\b(?:flood|rain|river|sea|storm|drain|sewer|sewage|muddy|dirty)[- ]?waters?"
+    r"|\bwaters?|\b(?:river|stream|creek|canal|nala|nullah|sea|lake)s?)"
+)
+#: Up to four helper words between the subject and the verb, in any tense: "has", "keeps",
+#: "has been", "started to", "is still slowly".
+_AUX = (
+    r"(?:\s+(?:is|are|was|were|has|have|had|been|be|keeps?|kept|started|starts|starting|"
+    r"began|begun|begins|continues|continued|still|now|already|just|slowly|quickly|rapidly|"
+    r"fast|suddenly|steadily|on|to|also)){0,4}"
+)
+#: Water moving in or rising, any tense: "entered", "is coming in", "keeps rising", "rose",
+#: "has reached", "seeping into", "flowing into", "got inside", "surrounded".
+_WATER_MOVES = (
+    r"\s+(?:enter(?:s|ed|ing)?|ris(?:e|es|en|ing)|rose|reach(?:es|ed|ing)?|seep(?:s|ed|ing)?|"
+    r"surround(?:s|ed|ing)?|"
+    r"(?:com(?:e|es|ing)|came|get(?:s|ting)?|got|pour(?:s|ed|ing)?|rush(?:es|ed|ing)?|"
+    r"gush(?:es|ed|ing)?|leak(?:s|ed|ing)?|spill(?:s|ed|ing)?)\s+(?:in|into|inside|through|over)|"
+    r"flow(?:s|ed|ing)?\s+(?:in|into|inside|through|over|onto|across|along|down))\b"
+)
+#: The flood is happening to the writer now (also used as "ongoing", see :func:`_ongoing`).
+_FLOOD_SITUATION = (
+    rf"{_WATER}{_AUX}{_WATER_MOVES}"
+    # "water everywhere", "water all around (us)", "water on all sides"
+    rf"|{_WATER}(?:\s+(?:is|was|are|were))?\s+(?:everywhere|all around|all over|on all sides)\b"
+    # "surrounded by water", "cut off by flood water", "stranded by the water"
+    r"|\b(?:surrounded|cut off|marooned|stranded|isolated|trapped)(?:\s+\w+){0,2}?\s+by\s+"
+    r"(?:the\s+)?(?:flood|rain)?\s?waters?\b"
+    # "filling with water", "full of water"
+    r"|\b(?:fill(?:s|ed|ing)?(?: up)? with|full of) (?:flood |rain |muddy |dirty )?water\b"
+    # "knee-deep water", "the water is waist deep" (not "knee-deep in paperwork")
+    r"|\b(?:ankle|knee|thigh|waist|hip|chest|neck)[- ]deep\b"
+    r"(?!\s+in\s+(?!(?:the\s+)?(?:flood|rain|muddy|dirty)?\s?water))"
+    # "water is up to my knees", "water up to the first floor"
+    rf"|{_WATER}{_AUX}\s+up ?to (?:my|our|the|his|her|their) (?:knees?|ankles?|thighs?|hips?|"
+    r"waist|chest|neck|shoulders?|(?:ground|first|second|upper|top) floor|ceiling|roof|"
+    r"windows?|doors?|doorsteps?)"
+    r"|\bwater (?:is )?rising\b|\brising water|\bwater[- ]?levels?\b"
+    r"|\b(?:under ?water|submerged)\b"
+)
+
 #: Ordered: the first match wins (more specific hazards before generic ones).
 _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (name, _compile(pattern))
@@ -212,14 +278,9 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("landslide", r"\b(landslide|mudslide|landslip|rockfall)s?\b"),
         (
             "flood",
-            r"\bflood\w*|\binundat\w*|\bwaterlogg\w*|\bwater (is )?rising\b|\brising water"
-            # "water is entering my house", "water coming into the house", "water inside"
-            r"|\bwater (is |was |has been |keeps )?(entering|coming in|coming into|coming inside|"
-            r"getting in|getting into|pouring in|pouring into|seeping in|seeping into|inside)\b"
-            r"|\b(under ?water|submerged|knee[- ]deep|waist[- ]deep|chest[- ]deep)\b"
-            r"|\bwater[- ]?level\b|\bwater (is )?up ?to (my|our|the) (knees?|waist|chest|neck)\b"
+            r"\bflood\w*|\binundat\w*|\bwaterlogg\w*|\bwater (is |was )?inside\b"
             r"|\boverflow\w*|\bburst (its|their) banks?\b|\bdam (broke|burst|breach\w*|failed)\b"
-            r"|\bfull of water\b|\bheavy rain\w*|\bcloud ?burst\b",
+            rf"|\bheavy rain\w*|\bcloud ?burst\b|{_FLOOD_SITUATION}",
         ),
         (
             "heatwave",
@@ -250,26 +311,73 @@ _TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
             r"\b(injur\w*|bleed\w*|unconscious|heart attack|not breathing|can'?t breathe|"
             r"chest pain|ambulance|faint\w*|seizure|stroke|overdose|poison\w*|snake ?bite|"
             r"fracture\w*|broken (arm|leg|bone)|medical|dizz(y|iness)|vomit\w*|choking|fever|"
-            r"hit (his|her|my|their|the) head|head (injury|wound)|had a fall|"
-            r"(fell|fallen) (down|off|from|over))\b",
+            r"hit (his|her|my|their|the) head|head (injury|wound)|had a fall)\b"
+            # A person fell ("my grandmother fell", "I slipped and fell", "she has fallen");
+            # things falling ("my phone fell off the table", "a tree fell") are not medical.
+            rf"|{_PERSON}(?:\s+(?:has|have|had|just|suddenly|accidentally|also|then|"
+            r"slipped and|tripped and))*\s+(?:fell|fallen)\b",
         ),
     )
 )
+#: Words that make "help me ..." an ordinary request ("help me find the help line").
+_REQUEST_VERBS = (
+    r"(?:find|locate|understand|prepare|plan|pack|make|choose|pick|learn|know|write|create|"
+    r"check|set|use|figure|decide|compare|translate|search|look|get ready|get started|with|by|"
+    r"out with)"
+)
 _HIGH_URGENCY = _compile(
-    r"\b(trapped|stuck|injured|bleeding|dying|drowning|unconscious|not breathing|"
-    r"can'?t breathe|cannot breathe|collapsed|sos|urgent(ly)?|immediately|right now|asap|"
-    r"life[- ]threatening|save (me|us)|rescue (me|us)|please help)\b"
+    r"\b(trapped|injured|bleeding|dying|drowning|unconscious|not breathing|"
+    r"can'?t breathe|cannot breathe|collapsed|urgent(ly)?|immediately|right now|asap|"
+    r"life[- ]threatening|save (me|us)|rescue (me|us))\b"
+    # A person is stuck ("we are stuck", "my kids are stuck inside"), not a phone or a
+    # page, and not in a traffic jam or on a question.
+    rf"|{_PERSON}(?:\s+(?:is|are|am|was|were|been|got|get|getting|still|now|all|both|have|"
+    r"has)){0,3}\s+stuck\b(?!\s+(?:in|at)\s+(?:the\s+|a\s+)?(?:traffic|jam|queue|line)\b)"
+    r"(?!\s+on\s+(?:the\s+|a\s+|this\s+)?(?:question|problem|level|step|screen|page)\b)"
+    r"|\bstuck (?:in|inside|under|on|at|beneath) (?:the |a |an |our |my )?(?:lift|elevator|"
+    r"rubble|debris|flood\w*|water|mud|snow|roof|rooftop|terrace|fire|basement|building)\b"
+    r"|\b(?:stranded|marooned) on (?:the |a |our |my )?(?:roof|rooftop|terrace|tree|top floor)\b"
+    # "SOS" as a cry for help, not about the app ("the SOS button", "what is SOS").
+    r"|(?<!the )(?<!what is )(?<!what's )\bsos\b(?!\s*(?:button|feature|page|screen|tab|"
+    r"settings?|contacts?|function|mode|app|work\w*|message settings)\b)"
     r"|\bemergency\b(?! ?(kit|bag|numbers?|contacts?|plan|supplies))"
-    r"|(?<!can you )(?<!could you )\bhelp (me|us)\b|\bhelp\s*!|^\W*help\b(?! (me )?(to|with)\b)"
+    # "help me/us" and "please help", unless an ordinary request follows.
+    r"|(?<!can you )(?<!could you )\b(?:please )?help (?:me|us)\b"
+    rf"(?!\s+(?:to\s+)?{_REQUEST_VERBS}\b)"
+    rf"|\bplease help\b(?!\s+(?:me\s+|us\s+)?(?:to\s+)?{_REQUEST_VERBS}\b)"
+    # "Help!", "Help, ...", "help" alone, "help please", "help needed".
+    r"|\bhelp\s*!|^\W*help\b(?=\s*(?:[,.;]|$)|\s+(?:help|please|now|quick(?:ly)?|fast|"
+    r"some(?:one|body)|any(?:one|body)|needed|required)\b)"
+)
+#: A message that *starts* with "help" ("Help my house is on fire"). Counts as a cry for help
+#: only together with a detected hazard (see :func:`keyword_classify`): "Help desk phone
+#: number?" or "help center hours" name a thing, not an emergency.
+_LEADING_HELP = _compile(
+    rf"^\W*help\b(?!\s+(?:me\s+|us\s+)?(?:to\s+)?{_REQUEST_VERBS}\b)"
+    r"(?!\s+(?:desk|cent(?:er|re)s?|lines?|page|section|menu|guide|topics?|button|docs?|faq)\b)"
 )
 #: The hazard is affecting the person right now ("water is entering my house", "up to my
 #: knees"): at least medium urgency, even when phrased as a question ("what should I do?").
+#: Matches inside an "if/when/in case" clause do not count (see :func:`_ongoing`).
 _ONGOING = _compile(
     r"\b(is|are|was|has been|keeps) (entering|coming in(to|side)?|getting in(to)?|pouring in(to)?|"
     r"seeping in(to)?|rising|shaking|trembling|collapsing|burning|on fire|under ?water|"
     r"flooded|flooding|submerged)\b"
     r"|\b(entering|inside|into) (my|our|the) (house|home|flat|room|building|basement)\b"
-    r"|\bup ?to (my|our|the) (knees?|waist|chest|neck|ankles?)\b|\b(knee|waist|chest)[- ]deep\b"
+    rf"|{_FLOOD_SITUATION}"
+)
+#: Words that make the rest of their clause hypothetical ("what should I do *if* water
+#: enters my house?" is a preparedness question, not a flood in progress).
+_CONDITIONAL = _compile(
+    r"\b(if|in case|incase|when|whenever|before|unless|suppose|supposing|what happens|"
+    r"what would happen)\b"
+)
+#: Where a clause starts (a hypothetical only covers its own clause).
+_CLAUSE_BREAK = _compile(r"[.!?;,]|\bbut\b|\band then\b")
+#: "What do I do?" — with a hazard in progress this asks for help, not for information.
+_WHAT_TO_DO = _compile(
+    r"\bwhat (?:do|should|can|shall|must) (?:i|we) do\b|\bwhat to do\b"
+    r"|\bhow (?:do|can|should) (?:i|we) (?:stay safe|get out|escape|survive)\b"
 )
 _SEEKING_HELP = _compile(
     r"\b(help|rescue|sos|trapped|stuck|evacuat\w*|nearest|nearby|near me|"
@@ -304,15 +412,34 @@ def normalize_intent(value: Any) -> str | None:
     return _INTENT_SYNONYMS.get(key)
 
 
+def _ongoing(text: str) -> bool:
+    """``True`` when the text describes a hazard in progress outside a hypothetical clause.
+
+    "Water entered my house, what do I do?" is ongoing; "What should I do if water enters
+    my house?" is not (the match follows "if" in the same clause).
+    """
+    for match in _ONGOING.finditer(text):
+        clause = _CLAUSE_BREAK.split(text[: match.start()])[-1]
+        if not _CONDITIONAL.search(clause):
+            return True
+    return False
+
+
 def keyword_classify(message: str) -> ClassifyResponse:
     """Deterministic classifier used when the LLM is unavailable (and as a safety floor)."""
     text = " ".join((message or "").split())
     disaster = next((name for name, pattern in _TYPE_PATTERNS if pattern.search(text)), UNKNOWN)
-    high = bool(_HIGH_URGENCY.search(text))
+    # A leading "help" is a cry for help when the message also names a hazard ("Help my
+    # house is on fire"), not when it names a thing ("Help desk phone number?").
+    high = bool(_HIGH_URGENCY.search(text)) or (
+        disaster != UNKNOWN and bool(_LEADING_HELP.search(text))
+    )
     seeking = bool(_SEEKING_HELP.search(text))
     info = bool(_ASKING_INFO.search(text))
+    ongoing = disaster != UNKNOWN and _ongoing(text)
 
-    if seeking and (high or not info):
+    if (seeking and (high or not info)) or (ongoing and _WHAT_TO_DO.search(text)):
+        # "Water has entered our home, what do I do" asks for help, not for information.
         intent = "seeking_help"
     elif info:
         intent = "asking_info"
@@ -326,7 +453,7 @@ def keyword_classify(message: str) -> ClassifyResponse:
         urgency = "high"
         if disaster == UNKNOWN:
             disaster = GENERAL
-    elif disaster != UNKNOWN and (intent != "asking_info" or _ONGOING.search(text)):
+    elif disaster != UNKNOWN and (intent != "asking_info" or ongoing):
         urgency = "medium"
     else:
         urgency = "low"
@@ -391,6 +518,21 @@ def extract_recommended_actions(
         if text and text not in cleaned:
             cleaned.append(text)
     return cleaned[:limit]
+
+
+def generic_safety_steps(emergency_number: str) -> list[str]:
+    """Basic steps for any emergency, shown when the message matched nothing.
+
+    The writer may be in danger and describe it in words the classifier does not know, or
+    be too stressed to describe it at all: "tell me more" alone would leave them with no
+    advice, so every answer carries the basics (and the frontend lists them as actions).
+    """
+    return [
+        f"Call {emergency_number} (or your local emergency number) if anyone is hurt or in danger.",
+        "Move away from immediate danger to a safe place.",
+        "Share your location with family, friends or rescuers (the SOS button texts your "
+        "emergency contacts).",
+    ]
 
 
 def coerce_location(location: Any) -> tuple[float, float] | None:
@@ -664,8 +806,14 @@ async def process_chat(
             sections.append(f"Advisory: {advisory_text}")
 
     response_text = "\n\n".join(section.strip() for section in sections if section.strip())
+    if not recommended_actions:
+        # No protocol ran (nothing recognised, or only nearby places were asked for): still
+        # list the basic steps, so an emergency described in unknown words gets advice.
+        recommended_actions = generic_safety_steps(emergency_numbers[0].split(" ")[0])
     if not response_text:
-        response_text = GENERIC_RESPONSE
+        response_text = (
+            f"{GENERIC_RESPONSE}\n\n{GENERIC_STEPS_HEADING}\n{format_bullets(recommended_actions)}"
+        )
 
     if not is_english(language):
         english = (response_text, advisory_text, recommended_actions, checklist_items, False)
@@ -751,11 +899,13 @@ __all__ = [
     "DEFAULT_EMERGENCY_NUMBERS",
     "EMERGENCY_NUMBERS",
     "GENERIC_RESPONSE",
+    "GENERIC_STEPS_HEADING",
     "PlacesProvider",
     "WeatherProvider",
     "classify_disaster",
     "coerce_location",
     "extract_recommended_actions",
+    "generic_safety_steps",
     "get_emergency_numbers",
     "keyword_classify",
     "normalize_intent",

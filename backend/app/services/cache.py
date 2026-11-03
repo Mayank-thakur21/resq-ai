@@ -31,7 +31,9 @@ class TTLCache:
     """Async-safe TTL + LRU cache.
 
     * ``get_or_set`` runs at most one factory call per key at a time (concurrent callers
-      wait for the first one instead of stampeding the upstream API).
+      wait for the first one instead of stampeding the upstream API) and hands its result
+      to every caller that was waiting for it — also when the TTL is ``0`` and nothing is
+      stored, so ``*_CACHE_TTL=0`` never turns concurrent loads into a serial queue.
     * Exceptions raised by the factory propagate and are **not** cached.
     * When ``max_size`` is exceeded, expired entries are purged first, then the least
       recently used entries are evicted.
@@ -45,6 +47,9 @@ class TTLCache:
         self._data: OrderedDict[Hashable, _Entry] = OrderedDict()
         self._locks: dict[Hashable, asyncio.Lock] = {}
         self._lock_users: dict[Hashable, int] = {}
+        #: Latest successful load per key while callers are waiting (a fresh 1-tuple each
+        #: time, so a waiter can tell whether a load finished after it started waiting).
+        self._loaded: dict[Hashable, tuple[Any]] = {}
         self.hits = 0
         self.misses = 0
 
@@ -105,6 +110,7 @@ class TTLCache:
         if lock is None:
             lock = self._locks[key] = asyncio.Lock()
         self._lock_users[key] = self._lock_users.get(key, 0) + 1
+        seen = self._loaded.get(key)
         try:
             async with lock:
                 # Another coroutine may have filled the entry while we waited.
@@ -112,9 +118,15 @@ class TTLCache:
                 if value is not _MISSING:
                     self.hits += 1
                     return cast(T, value)
+                loaded = self._loaded.get(key)
+                if loaded is not None and loaded is not seen:
+                    # A load finished while we waited but was not stored (TTL <= 0).
+                    self.hits += 1
+                    return cast(T, loaded[0])
                 self.misses += 1
                 result = await factory()
                 self.set(key, result, ttl(result) if callable(ttl) else ttl)
+                self._loaded[key] = (result,)
                 return result
         finally:
             # Drop the per-key lock once nobody is using or waiting for it.
@@ -124,6 +136,7 @@ class TTLCache:
             else:
                 self._lock_users.pop(key, None)
                 self._locks.pop(key, None)
+                self._loaded.pop(key, None)
 
     # -- internals ---------------------------------------------------------------------------------
     def _evict(self) -> None:

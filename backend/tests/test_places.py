@@ -543,18 +543,23 @@ async def test_slot_wait_never_exceeds_the_request_budget(
     assert route.call_count == 0
 
 
+#: ``out count;`` element Overpass writes after each type's block of a view query.
+COUNT_MARKER: dict[str, Any] = {
+    "type": "count",
+    "id": 0,
+    "tags": {"nodes": "1", "ways": "0", "relations": "0", "total": "1"},
+}
+#: Overpass ran out of time after the hospital block (shelter, police, ... never ran).
+PARTIAL_VIEW: dict[str, Any] = {
+    "remark": 'runtime error: Query timed out in "query" at line 9 after 10 seconds.',
+    "elements": [*MIXED_VIEW["elements"][:1], COUNT_MARKER],
+}
+
+
 async def test_partial_answers_are_cached_briefly(
     service: PlacesService, respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    respx_mock.post(OVERPASS_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "remark": "runtime error: Query timed out",
-                "elements": MIXED_VIEW["elements"][:1],
-            },
-        )
-    )
+    respx_mock.post(OVERPASS_URL).mock(return_value=httpx.Response(200, json=PARTIAL_VIEW))
     stored: list[float] = []
     real_set = service.cache.set
 
@@ -653,3 +658,103 @@ async def test_waiting_too_long_for_a_slot_fails_fast(
         for _ in range(places_module.MAX_CONCURRENT_OVERPASS):
             service._slots.release()
     assert route.call_count == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 3: partial views never serve unreached types as empty; overall deadline
+# ---------------------------------------------------------------------------------------------
+def test_view_query_marks_every_type_with_a_count() -> None:
+    query = places_module.build_overpass_view_query(*DELHI, 5800, 10)
+    assert query.count("out count;") == len(places_module.PLACE_FILTERS)
+    # One marker right after each type's own ``out``, in PLACE_FILTERS order.
+    assert query.count(f"out tags center {places_module.OVERPASS_MAX_ELEMENTS};\nout count;") == 5
+
+
+def test_parse_partial_view_keeps_only_types_searched_completely() -> None:
+    elements = MIXED_VIEW["elements"]
+    payload = {
+        "remark": "runtime error: Query run out of memory",
+        # hospital block + marker, shelter block + marker, police element without marker
+        "elements": [
+            *(elements[0], COUNT_MARKER),
+            *(elements[1], elements[2], COUNT_MARKER),
+            elements[3],
+        ],
+    }
+    places, complete = parse_overpass_view(payload)
+    assert not complete
+    assert {t: [p.id for p in items] for t, items in places.items()} == {
+        "hospital": ["node/1"],
+        "shelter": ["node/2", "node/3"],
+    }
+    # Not even the first type finished: nothing is known.
+    with pytest.raises(UpstreamError):
+        parse_overpass_view({"remark": "runtime error: timeout", "elements": elements[:1]})
+    # A complete answer does not depend on the markers.
+    places, complete = parse_overpass_view({"elements": [*elements[:1], COUNT_MARKER]})
+    assert complete and set(places) == set(places_module.PLACE_FILTERS)
+    assert places["police"] == ()
+
+
+def test_partial_view_does_not_report_unreached_types_as_empty(
+    client: TestClient, respx_mock: respx.MockRouter
+) -> None:
+    """Regression: a timed-out view answered police/fire_station/shelter/pharmacy with
+    200 {"places": []} for 60 s, i.e. "no shelters near you" during a flood."""
+    route = respx_mock.post(OVERPASS_URL).mock(return_value=httpx.Response(200, json=PARTIAL_VIEW))
+    params = {"lat": DELHI[0], "lon": DELHI[1]}
+    hospital = client.get("/api/places", params={**params, "type": "hospital"})
+    assert hospital.status_code == 200
+    assert [p["id"] for p in hospital.json()["places"]] == ["node/1"]
+    for place_type in ("shelter", "police", "fire_station", "pharmacy"):
+        response = client.get("/api/places", params={**params, "type": place_type})
+        assert response.status_code == 502, place_type
+        assert response.json()["error"]["code"] == "upstream_error"
+    assert route.call_count == 1  # the partial view itself is still cached briefly
+
+
+class _TrickleStream(httpx.AsyncByteStream):
+    """A valid but slowly streamed body: one byte every ``delay`` seconds."""
+
+    def __init__(self, body: bytes, delay: float) -> None:
+        self.body = body
+        self.delay = delay
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for index in range(len(self.body)):
+            await asyncio.sleep(self.delay)
+            yield self.body[index : index + 1]
+
+
+async def test_slowly_streamed_answer_is_cut_at_the_request_budget(
+    service: PlacesService, respx_mock: respx.MockRouter
+) -> None:
+    """Regression: httpx timeouts bound each read, not the request, so an answer trickling in
+    (headers at once, then a byte every 0.8 s) ran 24.9 s against a 17 s budget."""
+    body = b'{"elements": []}' + b" " * 8  # 24 bytes, ~4.8 s at 0.2 s per byte
+    respx_mock.post(OVERPASS_URL).mock(
+        return_value=httpx.Response(200, stream=_TrickleStream(body, 0.2))
+    )
+    service.request_budget_seconds = 1.5
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(UpstreamError, match="took too long"):
+        await service.get_places(*DELHI, "hospital")
+    assert loop.time() - started < 2.5
+    assert not service._slots.locked()  # the slot was given back
+
+
+async def test_overpass_server_timeout_stays_inside_the_budget(
+    service: PlacesService, respx_mock: respx.MockRouter
+) -> None:
+    """Regression: the 429 retry sent ``[timeout:5]`` with a 4 s HTTP timeout."""
+    route = respx_mock.post(OVERPASS_URL).mock(
+        side_effect=[httpx.Response(429), httpx.Response(200, json=MIXED_VIEW)]
+    )
+    service.request_budget_seconds = places_module.MIN_ATTEMPT_SECONDS + 0.5
+    assert [p.id for p in await service.get_places(*DELHI, "police")] == ["node/4"]
+    for call in route.calls:
+        server_timeout = int(_query_of(call).split("[timeout:", 1)[1].split("]", 1)[0])
+        assert server_timeout < service.request_budget_seconds
+    assert places_module.overpass_server_timeout(15.0, 10) == 10  # the normal case
+    assert places_module.overpass_server_timeout(4.0, 10) == 2

@@ -73,5 +73,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # A single worker on purpose: SQLite, the in-process rate limiter and the alert poller all
 # assume one process. --proxy-headers honours X-Forwarded-Proto/For from trusted proxies
-# (FORWARDED_ALLOW_IPS, default 127.0.0.1).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+# (FORWARDED_ALLOW_IPS, default 127.0.0.1). --no-access-log: uvicorn's access line includes
+# the query string (users' coordinates); the app's own "app.access" log records every
+# request's method, path, status and duration without it.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]

@@ -85,8 +85,11 @@ class Settings(BaseSettings):
     # Twilio SMS per caller (signed-in user id, else client address with IPv6 by /64), so one
     # caller cannot drain the shared budgets below with made-up numbers.
     sos_sms_per_client_limit: str = "30/hour;100/day"
+    # Twilio SMS per client address (IPv6 by /64) for everyone sending from it, signed in or
+    # not, so a pile of cheap accounts created on one address shares one budget.
+    sos_sms_per_address_limit: str = "60/hour;200/day"
     # Twilio SMS for all anonymous callers together (a part of the global budget that
-    # anonymous traffic may use; signed-in users always keep the rest).
+    # anonymous traffic may use; it can never take more than this).
     sos_sms_anonymous_limit: str = "200/hour;1000/day"
     # Twilio SMS for the whole server (caps the operator's bill whatever the callers do).
     sos_sms_global_limit: str = "500/hour;3000/day"
@@ -139,6 +142,7 @@ class Settings(BaseSettings):
         "sos_rate_limit",
         "sos_sms_per_number_limit",
         "sos_sms_per_client_limit",
+        "sos_sms_per_address_limit",
         "sos_sms_anonymous_limit",
         "sos_sms_global_limit",
         "incident_rate_limit",

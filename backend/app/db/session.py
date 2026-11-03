@@ -49,13 +49,20 @@ def _enable_sqlite_foreign_keys(dbapi_connection: Any, _connection_record: Any) 
 #: Seconds a request waits for a pooled connection before failing with ``503 service_busy``
 #: (SQLAlchemy's default of 30 s is longer than the frontend proxy's 20 s upstream timeout).
 POOL_TIMEOUT_SECONDS = 10
+#: SQLite busy timeout: how long a statement waits for another connection's write lock
+#: (sqlite3's default is 5 s). Cancelling a waiting statement from asyncio does not stop it:
+#: SQLAlchemy closes the connection gracefully, which waits for the driver thread until the
+#: busy timeout expires. So this is what really bounds e.g. the SOS audit write
+#: (``AUDIT_WRITE_TIMEOUT_SECONDS``), and it must not be longer than that bound.
+SQLITE_BUSY_TIMEOUT_SECONDS = 3.0
 
 
 def create_engine(settings: Settings) -> AsyncEngine:
     """Create the async engine for ``settings.database_url``.
 
     SQLite: creates the data directory, enables ``PRAGMA foreign_keys=ON`` on every
-    connection and uses a static pool for in-memory databases.
+    connection, waits at most :data:`SQLITE_BUSY_TIMEOUT_SECONDS` for a locked database and
+    uses a static pool for in-memory databases.
 
     ``hide_parameters=True``: SQLAlchemy error messages (``StatementError`` and subclasses)
     otherwise embed the bound row values — SOS locations, names and messages, email
@@ -65,9 +72,10 @@ def create_engine(settings: Settings) -> AsyncEngine:
     kwargs: dict[str, Any] = {"hide_parameters": True}
     if settings.is_sqlite:
         _ensure_sqlite_directory(url)
+        kwargs["connect_args"] = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS}
         if ":memory:" in url:
             kwargs["poolclass"] = StaticPool
-            kwargs["connect_args"] = {"check_same_thread": False}
+            kwargs["connect_args"]["check_same_thread"] = False
         else:
             kwargs["pool_timeout"] = POOL_TIMEOUT_SECONDS
     else:

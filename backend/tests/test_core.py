@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -309,6 +310,22 @@ class TestLogging:
         assert root.level == logging.INFO
         # httpx would log full URLs (incl. API keys) at INFO.
         assert logging.getLogger("httpx").level >= logging.WARNING
+
+    def test_request_logs_never_contain_query_strings(
+        self, probe_client: TestClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression: uvicorn's access log (on by default) recorded every query string, i.e.
+        users' coordinates, next to the app's own path-only access line."""
+        configure_logging("INFO")
+        assert not logging.getLogger("uvicorn.access").isEnabledFor(logging.INFO)
+        with caplog.at_level(logging.INFO):
+            probe_client.get("/api/_probe/ping", params={"lat": "28.6139", "lon": "77.209"})
+        access = [r.getMessage() for r in caplog.records if r.name == "app.access"]
+        assert access and all("/api/_probe/ping" in line for line in access)
+        assert not any("28.6139" in r.getMessage() for r in caplog.records)
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+        cmd = next(line for line in dockerfile.splitlines() if line.startswith("CMD"))
+        assert "--no-access-log" in cmd
 
 
 # ---------------------------------------------------------------------------------------------
@@ -804,7 +821,48 @@ class TestTTLCache:
         results = await asyncio.gather(*(cache.get_or_set("k", 60, slow) for _ in range(10)))
         assert results == ["done"] * 10
         assert calls == 1
-        assert cache._locks == {} and cache._lock_users == {}
+        assert cache._locks == {} and cache._lock_users == {} and cache._loaded == {}
+
+    async def test_zero_ttl_shares_one_load_with_concurrent_callers(self) -> None:
+        """Regression: with TTL 0 the single-flight lock made identical concurrent loads run
+        one after another (5 callers of a 1 s load finished at 1, 2, 3, 4 and 5 s)."""
+        cache = TTLCache()
+        calls = 0
+
+        async def slow() -> int:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.2)
+            return calls
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        results = await asyncio.gather(*(cache.get_or_set("k", 0, slow) for _ in range(5)))
+        assert results == [1] * 5
+        assert calls == 1
+        assert loop.time() - started < 0.6
+        assert "k" not in cache and cache._loaded == {}
+        # Nothing was stored: the next (non-concurrent) call loads again.
+        assert await cache.get_or_set("k", 0, slow) == 2
+
+    async def test_waiters_after_a_failed_load_retry_themselves(self) -> None:
+        cache = TTLCache()
+        attempts = 0
+
+        async def flaky() -> str:
+            nonlocal attempts
+            attempts += 1
+            await asyncio.sleep(0.01)
+            if attempts == 1:
+                raise RuntimeError("upstream down")
+            return "ok"
+
+        results = await asyncio.gather(
+            *(cache.get_or_set("k", 0, flaky) for _ in range(3)), return_exceptions=True
+        )
+        assert isinstance(results[0], RuntimeError)
+        assert results[1:] == ["ok", "ok"]
+        assert attempts == 2
 
     def test_lru_eviction_and_clear(self) -> None:
         cache = TTLCache(max_size=2)

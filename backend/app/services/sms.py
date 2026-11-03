@@ -26,9 +26,14 @@ Abuse budgets (checked and consumed atomically before a number is handed to Twil
 * ``SOS_SMS_PER_CLIENT_LIMIT`` per caller (signed-in user id, else the client address with
   IPv6 reduced to its /64) — one caller cannot use up the shared budgets with made-up
   numbers;
+* ``SOS_SMS_PER_ADDRESS_LIMIT`` per client address (IPv6 by /64) for everyone sending from
+  it, signed in or not — accounts are cheap to create (no email verification), so without
+  it a dozen accounts registered from one address could spend the whole global budget;
 * ``SOS_SMS_ANONYMOUS_LIMIT`` for all anonymous callers together — a smaller pool, so
   anonymous traffic can never drain what signed-in users need;
-* ``SOS_SMS_GLOBAL_LIMIT`` for the whole server (caps the operator's Twilio bill).
+* ``SOS_SMS_GLOBAL_LIMIT`` for the whole server (caps the operator's Twilio bill). A
+  distributed caller (many addresses, many accounts) can still use it up: it is a bill
+  guard, and over budget every contact still gets the native-SMS fallback.
 
 When Twilio *rejects* a message (``TwilioRestException``: invalid number, unroutable region,
 ...), no message was created and nothing is billed, so the shared budgets (anonymous and
@@ -92,6 +97,11 @@ NUMBER_BUDGET_ERROR = (
 #: Shown when the caller's own SMS budget is used up.
 CLIENT_BUDGET_ERROR = (
     "You have sent many SOS text messages recently. Send it from your phone's SMS app instead."
+)
+#: Shown when the budget of the caller's address (all its users together) is used up.
+ADDRESS_BUDGET_ERROR = (
+    "Many SOS text messages were sent from your network recently. "
+    "Send it from your phone's SMS app instead."
 )
 #: Shown when the budget shared by all anonymous callers is used up.
 ANONYMOUS_BUDGET_ERROR = (
@@ -255,7 +265,7 @@ class SMSService:
         return self._hash("sos-sms-number", number)
 
     def _budget_charges(
-        self, number: str, client_key: str | None, anonymous: bool
+        self, number: str, client_key: str | None, address_key: str | None, anonymous: bool
     ) -> list[tuple[_Charge, str]]:
         """Budgets a send to ``number`` counts against, each with its refusal message."""
         settings = self.settings
@@ -280,6 +290,17 @@ class SMSService:
                     CLIENT_BUDGET_ERROR,
                 )
             )
+        if address_key:
+            charges.append(
+                (
+                    _Charge(
+                        settings.sos_sms_per_address_limit,
+                        ("sos-sms-address", self._hash("sos-sms-address", address_key)),
+                        shared=False,
+                    ),
+                    ADDRESS_BUDGET_ERROR,
+                )
+            )
         if anonymous:
             charges.append(
                 (
@@ -296,7 +317,7 @@ class SMSService:
         return charges
 
     def _reserve(
-        self, number: str, client_key: str | None, anonymous: bool
+        self, number: str, client_key: str | None, address_key: str | None, anonymous: bool
     ) -> list[_Charge] | SMSFailed:
         """Count ``number`` against every budget, or an :class:`SMSFailed` when over one.
 
@@ -306,7 +327,7 @@ class SMSService:
         if not self._limiter.enabled:
             return []
         masked = mask_phone(number)
-        charges = self._budget_charges(number, client_key, anonymous)
+        charges = self._budget_charges(number, client_key, address_key, anonymous)
         for charge, error in charges:
             if not self._limiter.test(charge.limit, *charge.identifiers):
                 level = (
@@ -357,6 +378,7 @@ class SMSService:
         body: str,
         *,
         client_key: str | None = None,
+        address_key: str | None = None,
         anonymous: bool = False,
     ) -> SMSResult:
         """Send ``body`` to every E.164 number; per-number failures are reported, not raised.
@@ -368,6 +390,9 @@ class SMSService:
             client_key: The caller's rate-limit identity (``user:<id>`` / ``ip:<bucket>``,
                 see :func:`app.core.rate_limit.client_key`) for the per-client budget;
                 ``None`` skips that budget.
+            address_key: The caller's client address bucket (``ip:<bucket>``) for the
+                per-address budget, shared by every caller on that address; ``None`` (the
+                address is unknown) skips that budget.
             anonymous: The caller is not signed in (also counts against the anonymous pool).
 
         Results keep the input order and carry masked numbers. When Twilio is not
@@ -389,7 +414,7 @@ class SMSService:
         outcomes: dict[str, SMSSent | SMSFailed] = {}
         jobs: dict[str, tuple[Future[tuple[SMSSent | SMSFailed, bool]], list[_Charge]]] = {}
         for number in unique:
-            reserved = self._reserve(number, client_key, anonymous)
+            reserved = self._reserve(number, client_key, address_key, anonymous)
             if isinstance(reserved, SMSFailed):
                 outcomes[number] = reserved
                 continue
@@ -399,9 +424,11 @@ class SMSService:
             waiters = {number: asyncio.wrap_future(job) for number, (job, _) in jobs.items()}
             await asyncio.wait(waiters.values(), timeout=max(0.0, deadline - loop.time()))
             for number, (job, charges) in jobs.items():
-                waiter = waiters[number]
-                if waiter.done() and not waiter.cancelled():
-                    outcome, rejected = waiter.result()
+                # Classify on the job itself: the asyncio wrapper only learns the result
+                # through a callback on the loop, so a send that finished in its thread just
+                # before the deadline can still look pending there.
+                if job.done() and not job.cancelled():
+                    outcome, rejected = job.result()
                     if rejected:
                         self._refund(charges, shared_only=True)
                     outcomes[number] = outcome
@@ -433,6 +460,7 @@ class SMSService:
 
 
 __all__ = [
+    "ADDRESS_BUDGET_ERROR",
     "ANONYMOUS_BUDGET_ERROR",
     "CLIENT_BUDGET_ERROR",
     "GLOBAL_BUDGET_ERROR",

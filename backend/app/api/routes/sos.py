@@ -7,7 +7,8 @@ Flow of an SOS:
 2. Send it to every contact through Twilio (:class:`~app.services.sms.SMSService`) — when
    Twilio is not configured nothing is sent and the UI uses ``fallback_sms_uri`` to open the
    phone's native SMS app instead. Twilio sends are bounded per destination number, per
-   caller, for anonymous callers together and server-wide (``SOS_SMS_*_LIMIT``, see
+   caller, per client address (all accounts on it together), for anonymous callers together
+   and server-wide (``SOS_SMS_*_LIMIT``, see
    :mod:`app.services.sms`), and optionally reserved for signed-in users
    (``SOS_SMS_REQUIRE_AUTH``); refused numbers are listed in ``sms.failed`` and covered by
    ``fallback_sms_uri``. The fan-out has an overall deadline so the response always beats
@@ -32,7 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUserDep, OptionalUserDep, SessionDep, SettingsDep, SMSDep
 from app.core.config import Settings
 from app.core.logging import mask_phone
-from app.core.rate_limit import client_ip, client_key, sos_rate_limit
+from app.core.rate_limit import (
+    client_ip,
+    client_key,
+    ip_bucket,
+    reported_client_ip,
+    sos_rate_limit,
+)
 from app.core.security import hash_identifier
 from app.db.models import SOSEvent, new_uuid, utcnow
 from app.schemas.common import error_responses
@@ -54,7 +61,10 @@ router = APIRouter(tags=["sos"])
 ANONYMOUS_NAME = "Anonymous"
 #: Maximum number of events returned by ``GET /api/sos/history``.
 MAX_HISTORY_EVENTS = 50
-#: Upper bound for storing the audit row after the SMS went out (seconds).
+#: Upper bound for storing the audit row after the SMS went out (seconds). With SQLite the
+#: real bound is the busy timeout (``app.db.session.SQLITE_BUSY_TIMEOUT_SECONDS``, kept at
+#: or below this): a cancelled statement still waits for it. SMS deadline (12 s) + this
+#: + overhead stays inside the proxy's 20 s timeout.
 AUDIT_WRITE_TIMEOUT_SECONDS = 3.0
 #: ``sms.failed`` error when ``SOS_SMS_REQUIRE_AUTH`` is on and the caller is anonymous.
 SIGN_IN_REQUIRED_ERROR = (
@@ -119,6 +129,17 @@ def numbers_needing_fallback(numbers: list[str], sms: SMSResult) -> list[str]:
     failed_masks = {item.to for item in sms.failed}
     pending = [number for number in numbers if mask_phone(number) in failed_masks]
     return pending or list(numbers)
+
+
+def sms_address_key(request: Request, signed_in: bool) -> str | None:
+    """Address bucket for the per-address SMS budget, ``None`` when the address is unknown.
+
+    Signed-in requests always come through the Next.js server, whose own address is shared
+    by every user, so only an address it (or a trusted proxy) reported counts. Anonymous
+    callers already share their per-client budget with everyone on the same address.
+    """
+    address = reported_client_ip(request) if signed_in else client_ip(request)
+    return f"ip:{ip_bucket(address)}" if address else None
 
 
 def _ip_hash_salt(settings: Settings) -> str:
@@ -199,7 +220,11 @@ async def create_sos(
         )
     else:
         sms_result = await sms.send_bulk(
-            numbers, sms_body, client_key=client_key(request), anonymous=user is None
+            numbers,
+            sms_body,
+            client_key=client_key(request),
+            address_key=sms_address_key(request, signed_in=user is not None),
+            anonymous=user is None,
         )
 
     event = SOSEvent(

@@ -354,6 +354,19 @@ def _trusted_proxy_ip(request: Request, hops: int) -> str | None:
     return normalise_ip(chain[max(0, len(chain) - hops)])
 
 
+def reported_client_ip(request: Request) -> str | None:
+    """The end client's address when a trusted party reported it, else ``None``.
+
+    That is our Next.js server (``X-ResQ-Client-IP`` with the internal key) or one of
+    ``TRUSTED_PROXY_HOPS`` reverse proxies (``X-Forwarded-For``). ``None`` means only the
+    socket peer is known, which for requests relayed by the Next.js server is that server
+    itself, shared by every user (signed-in requests always arrive that way).
+    """
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    hops = settings.trusted_proxy_hops if settings is not None else 0
+    return forwarded_client_ip(request) or _trusted_proxy_ip(request, hops)
+
+
 def client_ip(request: Request) -> str:
     """Best trustworthy client address (see the module docstring); memoised per request."""
     cached = getattr(request.state, _CLIENT_IP_STATE_ATTR, None)

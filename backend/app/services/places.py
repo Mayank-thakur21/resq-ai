@@ -34,16 +34,25 @@ values can no longer produce new upstream queries.
 
 Failures raise :class:`~app.core.errors.UpstreamError` (HTTP 502): an empty list would be
 indistinguishable from "nothing nearby", which is dangerous in an emergency app. The chat
-agent catches the error and degrades gracefully. A partial answer (Overpass reports a
-runtime error but returned some elements) is served but cached only briefly
+agent catches the error and degrades gracefully.
+
+Partial answers: when Overpass runs out of time or memory it still answers HTTP 200 with the
+elements written so far and a "runtime error" ``remark``. The types are queried one after
+another, so a type that was never reached would look exactly like a type with no results.
+Every type's block therefore ends with ``out count;``, and in a partial answer only the
+types whose count marker arrived are known; the others raise :class:`UpstreamError` instead
+of being served as empty. A partial view is cached only briefly
 (:data:`PARTIAL_RESULT_TTL_SECONDS`).
 
 Concurrency and time budget: upstream queries pass through a per-process semaphore of
 ``OVERPASS_MAX_CONCURRENCY`` slots (default :data:`MAX_CONCURRENT_OVERPASS`, what the public
 instance allows; raise it for a self-hosted ``OVERPASS_URL``). Every lookup has a total
 budget of :data:`REQUEST_BUDGET_SECONDS` (inside the frontend proxy's 20 s timeout): the slot
-wait, the HTTP timeout and the single retry of a 429 are all cut to what is left of it. A
-"busy" failure is remembered for only :data:`BUSY_FAILURE_TTL_SECONDS`.
+wait, the HTTP request and the single retry of a 429 all run against one deadline, which is
+enforced as a whole (``asyncio.timeout``, so a slowly streamed answer cannot run past it;
+httpx timeouts only bound each phase and each read). Overpass's own ``[timeout:N]`` is kept
+inside what is left of it. A "busy" failure is remembered for only
+:data:`BUSY_FAILURE_TTL_SECONDS`.
 """
 
 from __future__ import annotations
@@ -160,6 +169,7 @@ PlacesByType = dict[str, tuple["RawPlace", ...]]
 class _View:
     """Cached answer of one combined query."""
 
+    #: Places per type; a partial answer only has the types it searched completely.
     places: PlacesByType
     complete: bool
 
@@ -233,12 +243,16 @@ class PlacesService:
         limit = int(clamp(limit, 1, MAX_PLACES_LIMIT))
 
         view = await self._view(lat, lon, radius_tier(radius))
+        items = view.places.get(place_type)
+        if items is None:
+            # Partial answer that never reached this type: unknown, not "nothing nearby".
+            raise UpstreamError(
+                "OpenStreetMap (Overpass) could not complete the search. Please retry shortly."
+            )
         radius_km = radius / 1000.0
         places = [
             place
-            for place in (
-                item.to_place(place_type, lat, lon) for item in view.places.get(place_type, ())
-            )
+            for place in (item.to_place(place_type, lat, lon) for item in items)
             if place.distance_km <= radius_km
         ]
         places.sort(key=lambda p: (p.distance_km, p.name.lower(), p.id))
@@ -313,17 +327,24 @@ class PlacesService:
     async def _fetch(self, lat: float, lon: float, radius_m: int, deadline: float) -> _View:
         remaining = deadline - asyncio.get_running_loop().time()
         timeout = max(1.0, min(self._request_timeout_s, remaining))
-        server_timeout = max(5, min(self._server_timeout_s, math.floor(timeout)))
+        server_timeout = overpass_server_timeout(timeout, self._server_timeout_s)
         query = build_overpass_view_query(lat, lon, radius_m, server_timeout)
+        too_slow = UpstreamError(
+            "OpenStreetMap (Overpass) took too long to answer. Please retry shortly."
+        )
         try:
-            response = await self.http.post(
-                self.url, data={"data": query}, timeout=httpx.Timeout(timeout)
-            )
+            # httpx bounds each phase and each read separately; this bounds the whole
+            # request, including an answer that keeps trickling in.
+            async with asyncio.timeout_at(deadline):
+                response = await self.http.post(
+                    self.url, data={"data": query}, timeout=httpx.Timeout(timeout)
+                )
+        except TimeoutError as exc:
+            logger.warning("Overpass exceeded the request budget (radius=%dm)", radius_m)
+            raise too_slow from exc
         except httpx.TimeoutException as exc:
             logger.warning("Overpass timed out (radius=%dm): %s", radius_m, type(exc).__name__)
-            raise UpstreamError(
-                "OpenStreetMap (Overpass) took too long to answer. Please retry shortly."
-            ) from exc
+            raise too_slow from exc
         except httpx.HTTPError as exc:
             logger.warning("Overpass request failed: %s", type(exc).__name__)
             raise UpstreamError("OpenStreetMap (Overpass) is unreachable.") from exc
@@ -364,6 +385,16 @@ def clamp_radius(radius_m: float) -> int:
     return int(clamp(round(radius_m), MIN_PLACES_RADIUS_M, MAX_PLACES_RADIUS_M))
 
 
+def overpass_server_timeout(http_timeout: float, configured: int) -> int:
+    """Overpass ``[timeout:N]`` for a request allowed ``http_timeout`` seconds in total.
+
+    Leaves up to :data:`TRANSFER_MARGIN_SECONDS` (at most half the time) for the transfer, so
+    the server-side limit never exceeds what is left of the request budget.
+    """
+    transfer = min(TRANSFER_MARGIN_SECONDS, http_timeout / 2)
+    return max(1, min(configured, math.floor(http_timeout - transfer)))
+
+
 def radius_tier(radius_m: int) -> int:
     """Smallest :data:`RADIUS_TIERS_M` entry covering ``radius_m`` (already clamped)."""
     for tier in RADIUS_TIERS_M:
@@ -395,12 +426,14 @@ def build_overpass_view_query(lat: float, lon: float, radius_m: int, timeout_s: 
     """One Overpass QL query returning every place type around (lat, lon).
 
     Each type is a separate union followed by its own ``out`` (so each type has its own
-    :data:`OVERPASS_MAX_ELEMENTS` cap); the answers are concatenated in one ``elements``
-    list and sorted back into types by :func:`parse_overpass_view`.
+    :data:`OVERPASS_MAX_ELEMENTS` cap) and an ``out count;`` marker that shows the type was
+    searched completely; the answers are concatenated in one ``elements`` list (types in
+    :data:`PLACE_FILTERS` order) and sorted back into types by :func:`parse_overpass_view`.
     """
     around = f"(around:{int(radius_m)},{lat:.6f},{lon:.6f})"
     blocks = "\n".join(
-        f"(\n{_statements(place_type, around)}\n);\nout tags center {OVERPASS_MAX_ELEMENTS};"
+        f"(\n{_statements(place_type, around)}\n);\n"
+        f"out tags center {OVERPASS_MAX_ELEMENTS};\nout count;"
         for place_type in PLACE_FILTERS
     )
     return f"[out:json][timeout:{int(timeout_s)}];\n{blocks}"
@@ -463,11 +496,19 @@ def parse_overpass_view(payload: Any) -> tuple[PlacesByType, bool]:
 
     Elements are sorted into types by their tags (:func:`place_types_of`); an element that
     matches no type is skipped, one that matches several is listed under each.
+
+    In a partial answer (runtime-error ``remark``) only the types whose ``out count`` marker
+    arrived are included; a missing key means "unknown", never "nothing found". A partial
+    answer that did not finish a single type raises :class:`UpstreamError`.
     """
     elements, complete = _elements(payload, "places view")
     found: dict[str, dict[str, RawPlace]] = {place_type: {} for place_type in PLACE_FILTERS}
+    finished = 0  # type blocks (in PLACE_FILTERS order) whose count marker arrived
     for element in elements:
         if not isinstance(element, Mapping):
+            continue
+        if element.get("type") == "count":
+            finished += 1
             continue
         tags = element.get("tags")
         for place_type in place_types_of(tags if isinstance(tags, Mapping) else {}):
@@ -475,7 +516,12 @@ def parse_overpass_view(payload: Any) -> tuple[PlacesByType, bool]:
             place = _parse_element(element, PLACE_LABELS[place_type])
             if place is not None and place.id not in bucket:
                 bucket[place.id] = place
-    return {place_type: tuple(items.values()) for place_type, items in found.items()}, complete
+    known = list(PLACE_FILTERS) if complete else list(PLACE_FILTERS)[:finished]
+    if not known:
+        raise UpstreamError("OpenStreetMap (Overpass) could not complete the search.")
+    if not complete:
+        logger.warning("Partial Overpass view: only %s searched completely", ", ".join(known))
+    return {place_type: tuple(found[place_type].values()) for place_type in known}, complete
 
 
 def _parse_element(element: Any, label: str) -> RawPlace | None:
@@ -587,6 +633,7 @@ __all__ = [
     "build_overpass_view_query",
     "clamp_radius",
     "format_address",
+    "overpass_server_timeout",
     "parse_overpass_elements",
     "parse_overpass_view",
     "place_types_of",

@@ -190,7 +190,7 @@ def test_successful_sign_in_forgives_earlier_typos(
     assert verify(client, me, "asha@example.com", "correct horse 42").status_code == 200
 
 
-def test_successful_sign_ins_are_never_counted(
+def test_successful_sign_ins_never_count_as_failures(
     client: TestClient, internal_headers: dict[str, str]
 ) -> None:
     register(client, internal_headers)
@@ -593,3 +593,147 @@ def test_ipv6_clients_share_a_bucket_per_64(
         for i in range(6)
     ]
     assert sign_ups == [201] * 5 + [429]
+
+
+# ----------------------------------------------------------------------------------------------
+# Review round 3: correct passwords are not free, bounded escape hatch, reserved bcrypt slots
+# ----------------------------------------------------------------------------------------------
+def test_successful_sign_ins_are_rate_limited_per_client(
+    client: TestClient, internal_headers: dict[str, str]
+) -> None:
+    """Regression: successes refunded every reservation, so a few clients looping a correct
+    password kept the shared bcrypt queue full (every other sign-in got 503)."""
+    from app.api.routes import users as user_routes
+
+    assert user_routes.VERIFY_ATTEMPTS_PER_CLIENT.startswith("30/minute")
+    register(client, internal_headers)
+    looper = from_client("203.0.113.70", internal_headers)
+    statuses = [
+        verify(client, looper, "asha@example.com", "correct horse 42").status_code
+        for _ in range(31)
+    ]
+    assert statuses == [200] * 30 + [429]
+    # Other clients (the owner on another network) are not affected.
+    owner = from_client("198.51.100.7", internal_headers)
+    assert verify(client, owner, "asha@example.com", "correct horse 42").status_code == 200
+
+
+def test_busy_answers_are_not_free_retries(
+    client: TestClient, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client spinning on 503 service_busy uses up its attempts and then gets 429."""
+    from app.api.routes import users as user_routes
+
+    register(client, internal_headers)
+    monkeypatch.setattr(user_routes, "VERIFY_ATTEMPTS_PER_CLIENT", "4/minute")
+    monkeypatch.setattr(user_service, "BCRYPT_MAX_PENDING", 0)  # every bcrypt job is refused
+    spinner = from_client("203.0.113.71", internal_headers)
+    statuses = [
+        verify(client, spinner, "asha@example.com", "correct horse 42").status_code
+        for _ in range(5)
+    ]
+    assert statuses == [503] * 4 + [429]
+
+
+async def test_busy_clients_cannot_fill_the_reserved_bcrypt_slots(
+    settings: Settings, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: 8 clients x 4 correct sign-ins in flight filled all 32 bcrypt slots, so a
+    person signing in for the first time got 503 for as long as the loop ran."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_service, "BCRYPT_MAX_PENDING", 8)
+    monkeypatch.setattr(user_service, "BCRYPT_RESERVED_FOR_QUIET", 3)
+    monkeypatch.setattr(user_routes, "QUIET_CLIENT_BCRYPT_JOBS", "1/minute")
+
+    async def submit(headers: dict[str, str]) -> asyncio.Task[httpx.Response]:
+        """Start one sign-in and wait until it is queued for bcrypt or answered."""
+        before = user_service.pending_bcrypt_jobs()
+        task = asyncio.create_task(_verify_async(http, headers, "correct horse 42"))
+        await _wait_until(lambda: task.done() or user_service.pending_bcrypt_jobs() > before)
+        return task
+
+    async with running_app(settings) as (_, http):
+        await _register_async(http, internal_headers)
+        gate = _gate_check_password(monkeypatch)
+        loopers = [from_client(f"203.0.113.{80 + i}", internal_headers) for i in range(2)]
+        flood = [
+            await submit(headers)
+            for headers in loopers
+            for _ in range(user_routes.MAX_VERIFY_IN_FLIGHT_PER_CLIENT)
+        ]
+        # Each looper's first job may use the whole queue, the others only 8 - 3 = 5 slots:
+        # looper A takes 4 slots, looper B its quiet one, B's three busy ones are refused.
+        assert user_service.pending_bcrypt_jobs() == 5
+        assert [t.done() for t in flood] == [False] * 5 + [True] * 3
+        assert [t.result().status_code for t in flood[5:]] == [503] * 3
+
+        newcomer = await submit(from_client("198.51.100.7", internal_headers))
+        assert not newcomer.done()
+        assert user_service.pending_bcrypt_jobs() == 6
+        gate.set()
+        assert (await newcomer).status_code == 200
+        assert sorted(r.status_code for r in await asyncio.gather(*flood)) == [200] * 5 + [503] * 3
+    assert user_service.pending_bcrypt_jobs() == 0
+
+
+def test_bcrypt_queue_limit_keeps_the_reserve() -> None:
+    assert user_service.bcrypt_queue_limit(True) == user_service.BCRYPT_MAX_PENDING
+    assert (
+        user_service.bcrypt_queue_limit(False)
+        == user_service.BCRYPT_MAX_PENDING - user_service.BCRYPT_RESERVED_FOR_QUIET
+    )
+
+
+def test_rotating_networks_cannot_multiply_the_account_budget(
+    client: TestClient, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: once the account bucket was full, every /64 with fewer than 2 own failures
+    was still admitted, so one /48 (65,536 /64s) got ~131k checks per hour on one account."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_routes, "VERIFY_FAILURES_PER_ACCOUNT", "3/hour")
+    monkeypatch.setattr(user_routes, "VERIFY_OVERFLOW_PER_ACCOUNT", "4/hour")
+    register(client, internal_headers)
+    owner = from_client("198.51.100.7", internal_headers)
+    assert verify(client, owner, "asha@example.com", "correct horse 42").status_code == 200
+
+    for i in range(3):  # fill the account bucket
+        attacker = from_client(f"203.0.113.{i + 1}", internal_headers)
+        assert verify(client, attacker, "asha@example.com", "guess").status_code == 401
+
+    statuses = [
+        verify(
+            client,
+            from_client(f"2001:db8:77:{i:x}::1", internal_headers),
+            "asha@example.com",
+            "guess",
+        ).status_code
+        for i in range(40)
+    ]
+    assert statuses.count(401) == 4  # the overflow bucket, not 2 per /64
+    assert statuses.count(429) == 36
+
+    # The owner signed in from their network before: still admitted, typo included.
+    assert verify(client, owner, "asha@example.com", "typo").status_code == 401
+    assert verify(client, owner, "asha@example.com", "correct horse 42").status_code == 200
+    # A network the account never signed in from waits for the window.
+    stranger = from_client("192.0.2.9", internal_headers)
+    assert verify(client, stranger, "asha@example.com", "correct horse 42").status_code == 429
+
+
+def test_escape_hatch_success_does_not_use_up_the_overflow(
+    client: TestClient, internal_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owners admitted through the overflow bucket get their reservation back on success."""
+    from app.api.routes import users as user_routes
+
+    monkeypatch.setattr(user_routes, "VERIFY_FAILURES_PER_ACCOUNT", "2/hour")
+    monkeypatch.setattr(user_routes, "VERIFY_OVERFLOW_PER_ACCOUNT", "1/hour")
+    register(client, internal_headers)
+    for i in range(2):
+        attacker = from_client(f"203.0.113.{i + 1}", internal_headers)
+        assert verify(client, attacker, "asha@example.com", "guess").status_code == 401
+    for i in range(3):  # three different owners' devices, each on a new network
+        device = from_client(f"198.51.100.{i + 10}", internal_headers)
+        assert verify(client, device, "asha@example.com", "correct horse 42").status_code == 200

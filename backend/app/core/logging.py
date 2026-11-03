@@ -35,6 +35,9 @@ _QUIET_LOGGERS: dict[str, int] = {
     "twilio.http_client": logging.WARNING,
     "urllib3": logging.WARNING,
     "slowapi": logging.WARNING,
+    # uvicorn's access line includes the query string, i.e. users' coordinates
+    # (?lat=..&lon=..); "app.access" logs the same requests without it.
+    "uvicorn.access": logging.WARNING,
 }
 
 

@@ -19,6 +19,11 @@ Bounded work, no held connections
 * At most :data:`BCRYPT_MAX_PENDING` bcrypt jobs (running + queued) are admitted at once;
   further sign-ins/registrations get ``503 service_busy`` with ``Retry-After`` straight away
   (:class:`PasswordHashingBusyError`) instead of queueing without limit.
+* :data:`BCRYPT_RESERVED_FOR_QUIET` of those slots are kept for "quiet" callers: jobs
+  submitted with ``use_reserve=False`` (the users routes pass that for clients that already
+  ran several bcrypt jobs in the last minute) are refused once the queue holds
+  ``BCRYPT_MAX_PENDING - BCRYPT_RESERVED_FOR_QUIET`` jobs. A few busy clients therefore
+  cannot fill the whole queue: a person signing in for the first time still gets a slot.
 * No database connection is held while waiting for bcrypt: the lookup's transaction is
   ended (``commit()`` returns the pooled connection) *before* the bcrypt job is queued.
   Earlier versions kept the connection checked out for the whole wait, so a burst of
@@ -64,6 +69,8 @@ BCRYPT_WORKERS = 2
 #: bcrypt jobs admitted at once (running + queued). At cost 12 the last one waits about
 #: ``BCRYPT_MAX_PENDING * 0.25 s / BCRYPT_WORKERS`` (~4 s); more are refused with 503.
 BCRYPT_MAX_PENDING = 32
+#: Part of :data:`BCRYPT_MAX_PENDING` that only ``use_reserve=True`` jobs may use.
+BCRYPT_RESERVED_FOR_QUIET = 8
 
 _dummy_hash: tuple[int, bytes] | None = None
 _executor: ThreadPoolExecutor | None = None
@@ -109,16 +116,30 @@ def _release_slot(_future: Future[object] | None = None) -> None:
         _pending = max(0, _pending - 1)
 
 
-async def _run_bcrypt[T](fn: Callable[..., T], *args: object) -> T:
+def bcrypt_queue_limit(use_reserve: bool = True) -> int:
+    """Jobs that may be pending when a new one is admitted (see the module docstring)."""
+    if use_reserve:
+        return BCRYPT_MAX_PENDING
+    unreserved = max(1, BCRYPT_MAX_PENDING - BCRYPT_RESERVED_FOR_QUIET)
+    return min(BCRYPT_MAX_PENDING, unreserved)
+
+
+async def _run_bcrypt[T](fn: Callable[..., T], *args: object, use_reserve: bool = True) -> T:
     """Run a blocking bcrypt call on the dedicated pool (bounded queue).
 
+    Args:
+        use_reserve: May use the slots kept for quiet callers (:data:`BCRYPT_RESERVED_FOR_QUIET`).
+
     Raises:
-        PasswordHashingBusyError: :data:`BCRYPT_MAX_PENDING` jobs are already admitted.
+        PasswordHashingBusyError: the queue already holds :func:`bcrypt_queue_limit` jobs.
     """
     global _pending
+    limit = bcrypt_queue_limit(use_reserve)
     with _pending_lock:
-        if _pending >= BCRYPT_MAX_PENDING:
-            logger.warning("bcrypt queue full (%d jobs); refusing request", _pending)
+        if _pending >= limit:
+            logger.warning(
+                "bcrypt queue full (%d jobs, limit %d); refusing request", _pending, limit
+            )
             raise PasswordHashingBusyError()
         _pending += 1
     try:
@@ -192,12 +213,15 @@ async def _end_transaction(session: AsyncSession) -> None:
     await session.commit()
 
 
-async def register_user(session: AsyncSession, email: str, password: str, name: str) -> User:
+async def register_user(
+    session: AsyncSession, email: str, password: str, name: str, *, use_reserve: bool = True
+) -> User:
     """Create a user (email normalised, bcrypt hash) and commit.
 
     The duplicate check's transaction is ended before hashing, so no database connection is
     held while the bcrypt job waits; a concurrent registration of the same address is still
-    caught by the unique index (409).
+    caught by the unique index (409). ``use_reserve`` is passed to the bcrypt queue (see the
+    module docstring).
 
     Raises:
         ConflictError: email already registered (409).
@@ -215,7 +239,7 @@ async def register_user(session: AsyncSession, email: str, password: str, name: 
         logger.info("Registration rejected: email already registered")
         raise ConflictError("An account with this email already exists.")
 
-    password_hash = await _run_bcrypt(hash_password, password)
+    password_hash = await _run_bcrypt(hash_password, password, use_reserve=use_reserve)
     user = User(email=normalised, name=clean_name, password_hash=password_hash)
     session.add(user)
     try:
@@ -228,11 +252,14 @@ async def register_user(session: AsyncSession, email: str, password: str, name: 
     return user
 
 
-async def verify_user(session: AsyncSession, email: str, password: str) -> VerifiedUser | None:
+async def verify_user(
+    session: AsyncSession, email: str, password: str, *, use_reserve: bool = True
+) -> VerifiedUser | None:
     """Return the user when the credentials match (constant-time), else ``None``.
 
     The lookup's transaction is ended before bcrypt runs (no pooled connection is held
-    while the job waits in the bcrypt queue).
+    while the job waits in the bcrypt queue). ``use_reserve`` is passed to the bcrypt queue
+    (see the module docstring).
 
     Raises:
         PasswordHashingBusyError: the bcrypt queue is full (503).
@@ -240,7 +267,7 @@ async def verify_user(session: AsyncSession, email: str, password: str) -> Verif
     try:
         normalised = normalize_email(email)
     except ValueError:
-        await _run_bcrypt(_burn_check, password)
+        await _run_bcrypt(_burn_check, password, use_reserve=use_reserve)
         return None
 
     user = await session.scalar(select(User).where(User.email == normalised))
@@ -252,11 +279,11 @@ async def verify_user(session: AsyncSession, email: str, password: str) -> Verif
     await _end_transaction(session)
 
     if found is None:
-        await _run_bcrypt(_burn_check, password)
+        await _run_bcrypt(_burn_check, password, use_reserve=use_reserve)
         logger.info("Login failed: unknown email")
         return None
     identity, password_hash = found
-    if not await _run_bcrypt(check_password, password, password_hash):
+    if not await _run_bcrypt(check_password, password, password_hash, use_reserve=use_reserve):
         logger.info("Login failed: wrong password for user %s", identity.id)
         return None
     return identity
@@ -264,10 +291,12 @@ async def verify_user(session: AsyncSession, email: str, password: str) -> Verif
 
 __all__ = [
     "BCRYPT_MAX_PENDING",
+    "BCRYPT_RESERVED_FOR_QUIET",
     "BCRYPT_ROUNDS",
     "BCRYPT_WORKERS",
     "PasswordHashingBusyError",
     "VerifiedUser",
+    "bcrypt_queue_limit",
     "check_password",
     "get_user_by_email",
     "hash_password",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import Callable, Iterator
@@ -870,3 +871,182 @@ def test_sos_history_without_jwt_secret_is_503(
 def test_route_module_constants() -> None:
     assert sos_routes.MAX_HISTORY_EVENTS == 50
     assert sos_routes.ANONYMOUS_NAME == "Anonymous"
+
+
+# ----------------------------------------------------------------------------------------------
+# Review round 3: accounts created on one address share one SMS budget
+# ----------------------------------------------------------------------------------------------
+async def test_sms_per_address_budget_is_shared_by_every_account(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    twilio = FakeTwilio()
+    settings = settings_factory(
+        **TWILIO_SETTINGS, sos_sms_per_client_limit="3/hour", sos_sms_per_address_limit="5/hour"
+    )
+    service = SMSService(settings, client_factory=lambda: twilio)
+    sent = 0
+    for user in range(4):  # four accounts on one address, three numbers each
+        result = await service.send_bulk(
+            [f"+1415555{user}{i:03d}" for i in range(3)],
+            "x",
+            client_key=f"user:sybil{user}",
+            address_key="ip:203.0.113.7",
+        )
+        sent += len(result.sent)
+        assert {f.error for f in result.failed} <= {sms_module.ADDRESS_BUDGET_ERROR}
+    assert sent == 5
+    other = await service.send_bulk([IN_NUMBER], "help", client_key="user:u1", address_key="ip:x")
+    assert len(other.sent) == 1
+
+
+def test_sybil_accounts_on_one_address_cannot_drain_the_global_sms_budget(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    """Regression: the per-caller budget was keyed only by user id, so ~17 accounts
+    registered from one IPv4 spent the whole global budget and every real SOS got
+    GLOBAL_BUDGET_ERROR for the rest of the hour."""
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    settings = settings_factory(
+        **TWILIO_SETTINGS,
+        sos_sms_per_client_limit="10/hour",
+        sos_sms_per_address_limit="20/hour",
+        sos_sms_global_limit="50/hour",
+    )
+    with TestClient(create_app(settings)) as client:
+        accepted = 0
+        for user in range(5):
+            numbers = [f"+1415555{user}{i:03d}" for i in range(10)]
+            response = client.post(
+                "/api/sos",
+                json=sos_payload(contact_numbers=numbers),
+                headers={
+                    **from_next("203.0.113.7", TEST_INTERNAL_KEY),
+                    "Authorization": f"Bearer {make_token(f'sybil{user}')}",
+                },
+            )
+            assert response.status_code == 200
+            accepted += len(response.json()["sms"]["sent"])
+        assert accepted == 20
+
+        real = client.post(
+            "/api/sos",
+            json=sos_payload(),
+            headers={
+                **from_next("198.51.100.20", TEST_INTERNAL_KEY),
+                "Authorization": f"Bearer {make_token('real-user')}",
+            },
+        ).json()
+    assert len(real["sms"]["sent"]) == 2
+    assert real["sms"]["failed"] == []
+
+
+def test_signed_in_sms_without_a_reported_address_skips_the_address_budget(
+    settings_factory: Callable[..., Settings],
+    fake_twilio: FakeTwilio,
+    monkeypatch: pytest.MonkeyPatch,
+    make_token: Callable[..., str],
+) -> None:
+    """Without X-ResQ-Client-IP the peer is the Next.js server, shared by every user: it must
+    not become one site-wide SMS budget for all signed-in users."""
+    monkeypatch.setattr(sms_module, "TwilioClient", lambda *a, **k: fake_twilio)
+    settings = settings_factory(**TWILIO_SETTINGS, sos_sms_per_address_limit="2/hour")
+    with TestClient(create_app(settings)) as client:
+        for user in range(3):
+            body = client.post(
+                "/api/sos",
+                json=sos_payload(contact_numbers=[f"+1415555{user}000", f"+1415555{user}001"]),
+                headers={"Authorization": f"Bearer {make_token(f'u{user}')}"},
+            ).json()
+            assert len(body["sms"]["sent"]) == 2
+
+
+def test_locked_sqlite_database_delays_the_sos_by_the_audit_bound_only(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a cancelled audit write still waited for SQLite's 5 s busy timeout (the
+    graceful connection close waits for the driver thread), so a write-locked database
+    delayed the SOS by ~5 s instead of AUDIT_WRITE_TIMEOUT_SECONDS."""
+    import sqlite3
+    import time
+
+    from app.db import session as db_session
+
+    assert db_session.SQLITE_BUSY_TIMEOUT_SECONDS <= sos_routes.AUDIT_WRITE_TIMEOUT_SECONDS
+    monkeypatch.setattr(db_session, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(sos_routes, "AUDIT_WRITE_TIMEOUT_SECONDS", 0.5)
+    settings = settings_factory()
+    path = settings.database_url.split("///", 1)[1]
+    with TestClient(create_app(settings)) as client:
+        assert client.post("/api/sos", json=sos_payload(contact_numbers=[])).status_code == 200
+        locked, release = threading.Event(), threading.Event()
+
+        def hold_write_lock() -> None:
+            con = sqlite3.connect(path, timeout=0)
+            con.execute("BEGIN EXCLUSIVE")
+            locked.set()
+            release.wait(10)
+            con.rollback()
+            con.close()
+
+        holder = threading.Thread(target=hold_write_lock)
+        holder.start()
+        try:
+            assert locked.wait(5)
+            started = time.monotonic()
+            response = client.post("/api/sos", json=sos_payload(contact_numbers=[]))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            holder.join()
+        assert response.status_code == 200
+        assert elapsed < 2.0  # ~0.5 s, not sqlite3's default 5 s busy wait
+        # The pool recovered: the next SOS is stored normally.
+        assert client.post("/api/sos", json=sos_payload(contact_numbers=[])).status_code == 200
+
+
+async def test_send_finished_just_before_the_deadline_is_classified_by_its_result(
+    settings_factory: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the outcome was read from the asyncio wrapper, which learns the thread's
+    result one loop iteration later. A rejection that finished right at the deadline was
+    reported as UNCONFIRMED and its shared budgets were never refunded."""
+    import time
+
+    release = threading.Event()
+
+    class SlowRejectingTwilio(FakeTwilio):
+        def create(self, **kwargs: Any) -> FakeMessage:
+            release.wait(timeout=5)
+            return super().create(**kwargs)
+
+    twilio = SlowRejectingTwilio(fail_with={BAD_NUMBER: invalid_number_error(BAD_NUMBER)})
+    settings = settings_factory(**TWILIO_SETTINGS, sos_sms_global_limit="1/hour")
+    service = SMSService(settings, client_factory=lambda: twilio)
+    service.deadline_seconds = 0.1
+    real_wait = asyncio.wait
+
+    async def deadline_then_thread_finishes(*args: Any, **kwargs: Any) -> Any:
+        outcome = await real_wait(*args, **kwargs)
+        release.set()
+        # Blocks the event loop on purpose: the job completes in its thread, but the
+        # wrapper's done-callback cannot run before send_bulk classifies the results.
+        time.sleep(0.3)  # noqa: ASYNC251
+        return outcome
+
+    monkeypatch.setattr(sms_module.asyncio, "wait", deadline_then_thread_finishes)
+    try:
+        result = await service.send_bulk([BAD_NUMBER], "x")
+    finally:
+        release.set()
+    monkeypatch.undo()
+    try:
+        [failed] = result.failed
+        assert failed.error.startswith("Twilio error 21211")
+        # The rejection was free, so the global budget was refunded for a real SOS.
+        real = await service.send_bulk([IN_NUMBER], "help")
+        assert len(real.sent) == 1
+    finally:
+        service.close()
